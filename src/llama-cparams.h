@@ -8,6 +8,7 @@
 // Filled by llama_edlm_set_segments / llama_edlm_set_readout. The graph reads seg at mask-fill time.
 struct llama_edlm_state {
     std::vector<int32_t> seg;
+    std::vector<llama_pos> pos; // RoPE ids. May restart per branch, so they are not batch.pos.
     int32_t decide = -1;
     std::vector<int32_t> opt;
     std::vector<float> pointer_logits;

@@ -19,6 +19,9 @@
 #include "mtmd-helper.h"
 
 #include <algorithm>
+#include <cctype>
+#include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cinttypes>
 #include <exception>
@@ -2707,53 +2710,160 @@ private:
             case SERVER_TASK_TYPE_EDLM:
                 {
                     auto fail = [&](const std::string & message) {
+                        if (ctx_tgt) {
+                            llama_edlm_set_segments(ctx_tgt, nullptr, 0);
+                        }
                         auto err = std::make_unique<server_task_result_error>();
                         err->id = task.id;
                         err->err_type = ERROR_TYPE_INVALID_REQUEST;
                         err->err_msg = message;
                         queue_results.send(std::move(err));
                     };
-                    if (!ctx_tgt || task.edlm_tokens.empty() || task.edlm_tokens.size() != task.edlm_segments.size() || task.edlm_groups.empty()) {
+                    const int n_all = (int) task.edlm_tokens.size();
+                    if (!ctx_tgt || n_all <= 0 || (int) task.edlm_segments.size() != n_all ||
+                            (int) task.edlm_positions.size() != n_all || task.edlm_groups.empty() ||
+                            task.edlm_n_state <= 0 || task.edlm_n_state > n_all) {
                         fail("edlm request is empty or the model is not loaded");
                         break;
                     }
-                    const int n = (int) task.edlm_tokens.size();
-                    llama_edlm_set_segments(ctx_tgt, task.edlm_segments.data(), n);
-                    const auto & first = task.edlm_groups.front();
-                    llama_edlm_set_readout(ctx_tgt, first.decide, first.options.data(), (int32_t) first.options.size());
-                    llama_batch batch = llama_batch_init(n, 0, 1);
-                    batch.n_tokens = n;
-                    for (int i = 0; i < n; ++i) {
-                        batch.token[i] = task.edlm_tokens[i];
-                        batch.pos[i] = i;
-                        batch.n_seq_id[i] = 1;
-                        batch.seq_id[i][0] = 0;
-                        batch.logits[i] = 1;
-                    }
-                    const int rc = llama_encode(ctx_tgt, batch);
-                    llama_batch_free(batch);
-                    if (rc != 0) {
-                        llama_edlm_set_segments(ctx_tgt, nullptr, 0);
-                        fail("edlm encode failed");
-                        break;
-                    }
-                    auto res = std::make_unique<server_task_result_edlm>();
-                    res->id = task.id;
-                    bool ok = true;
-                    for (const auto & group : task.edlm_groups) {
-                        llama_edlm_retarget_readout(ctx_tgt, group.decide, group.options.data(), (int32_t) group.options.size());
-                        float * logits = llama_edlm_get_pointer_logits(ctx_tgt);
-                        if (!logits) {
-                            ok = false;
+                    bool busy = false;
+                    for (const auto & slot : slots) {
+                        if (slot.is_processing()) {
+                            busy = true;
                             break;
                         }
-                        res->groups.emplace_back(logits, logits + group.options.size());
                     }
-                    llama_edlm_set_segments(ctx_tgt, nullptr, 0);
-                    if (!ok) {
-                        fail("model has no pointer head");
+                    if (busy) {
+                        fail("edlm encode needs the context idle");
                         break;
                     }
+                    auto encode_span = [&](const std::vector<llama_token> & tokens,
+                                           const std::vector<int32_t> & segments,
+                                           const std::vector<llama_pos> & positions,
+                                           const std::vector<server_task::edlm_group> & groups,
+                                           std::vector<std::vector<float>> & out) -> bool {
+                        const int n = (int) tokens.size();
+                        if (n <= 0 || (int) segments.size() != n || (int) positions.size() != n || groups.empty()) {
+                            fail("edlm batch is malformed");
+                            return false;
+                        }
+                        const uint32_t n_ctx = llama_n_ctx(ctx_tgt);
+                        const uint32_t n_batch = llama_n_batch(ctx_tgt);
+                        const uint32_t n_ubatch = llama_n_ubatch(ctx_tgt);
+                        if ((uint32_t) n > n_ctx || (uint32_t) n > n_batch || (uint32_t) n > n_ubatch) {
+                            fail("edlm batch of " + std::to_string(n) + " tokens does not fit n_ctx=" +
+                                 std::to_string(n_ctx) + " n_batch=" + std::to_string(n_batch) +
+                                 " n_ubatch=" + std::to_string(n_ubatch) + "; raise -c -b -ub");
+                            return false;
+                        }
+                        llama_edlm_set_segments(ctx_tgt, segments.data(), n);
+                        llama_edlm_set_positions(ctx_tgt, positions.data(), n);
+                        const auto & first = groups.front();
+                        llama_edlm_set_readout(ctx_tgt, first.decide, first.options.data(), (int32_t) first.options.size());
+                        llama_batch batch = llama_batch_init(n, 0, 1);
+                        batch.n_tokens = n;
+                        for (int i = 0; i < n; ++i) {
+                            batch.token[i] = tokens[i];
+                            // The batch allocator rejects a position restart. RoPE reads edlm positions instead.
+                            batch.pos[i] = i;
+                            batch.n_seq_id[i] = 1;
+                            batch.seq_id[i][0] = 0;
+                            batch.logits[i] = 1;
+                        }
+                        const int rc = llama_encode(ctx_tgt, batch);
+                        llama_batch_free(batch);
+                        if (rc != 0) {
+                            fail("edlm encode failed");
+                            return false;
+                        }
+                        for (const auto & group : groups) {
+                            if (group.decide < 0 || group.decide >= n || group.options.empty()) {
+                                fail("edlm readout is outside the batch");
+                                return false;
+                            }
+                            llama_edlm_retarget_readout(ctx_tgt, group.decide, group.options.data(), (int32_t) group.options.size());
+                            float * logits = llama_edlm_get_pointer_logits(ctx_tgt);
+                            if (!logits) {
+                                fail("model has no pointer head");
+                                return false;
+                            }
+                            out.emplace_back(logits, logits + group.options.size());
+                        }
+                        llama_edlm_set_segments(ctx_tgt, nullptr, 0);
+                        return true;
+                    };
+                    const auto t0 = std::chrono::steady_clock::now();
+                    std::vector<std::vector<float>> scored;
+                    bool ok = true;
+                    if (!task.edlm_rows) {
+                        ok = encode_span(task.edlm_tokens, task.edlm_segments, task.edlm_positions, task.edlm_groups, scored);
+                    } else {
+                        const int n_state = task.edlm_n_state;
+                        for (int i = 0; i < n_state; ++i) {
+                            if (task.edlm_segments[i] != 0) {
+                                fail("edlm row layout is malformed");
+                                ok = false;
+                                break;
+                            }
+                        }
+                        int cursor = n_state;
+                        for (const auto & group : task.edlm_groups) {
+                            if (!ok) {
+                                break;
+                            }
+                            if (group.decide < cursor || group.decide >= n_all) {
+                                fail("edlm row layout is malformed");
+                                ok = false;
+                                break;
+                            }
+                            for (int i = cursor; i <= group.decide; ++i) {
+                                if (task.edlm_segments[i] <= 0) {
+                                    fail("edlm row layout is malformed");
+                                    ok = false;
+                                    break;
+                                }
+                            }
+                            if (!ok) {
+                                break;
+                            }
+                            const int end = group.decide + 1;
+                            std::vector<llama_token> tokens(task.edlm_tokens.begin(), task.edlm_tokens.begin() + n_state);
+                            tokens.insert(tokens.end(), task.edlm_tokens.begin() + cursor, task.edlm_tokens.begin() + end);
+                            std::vector<llama_pos> positions(task.edlm_positions.begin(), task.edlm_positions.begin() + n_state);
+                            positions.insert(positions.end(), task.edlm_positions.begin() + cursor, task.edlm_positions.begin() + end);
+                            std::vector<int32_t> segments(n_state, 0);
+                            segments.insert(segments.end(), task.edlm_segments.begin() + cursor, task.edlm_segments.begin() + end);
+                            server_task::edlm_group rel;
+                            rel.decide = n_state + (group.decide - cursor);
+                            for (int32_t opt : group.options) {
+                                if (opt < cursor || opt > group.decide) {
+                                    fail("edlm readout is outside the batch");
+                                    ok = false;
+                                    break;
+                                }
+                                rel.options.push_back(n_state + (opt - cursor));
+                            }
+                            if (!ok) {
+                                break;
+                            }
+                            std::vector<server_task::edlm_group> one;
+                            one.push_back(std::move(rel));
+                            ok = encode_span(tokens, segments, positions, one, scored);
+                            cursor = end;
+                        }
+                        if (ok && cursor != n_all) {
+                            fail("edlm row layout is malformed");
+                            ok = false;
+                        }
+                    }
+                    if (!ok) {
+                        break;
+                    }
+                    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                    auto res = std::make_unique<server_task_result_edlm>();
+                    res->id = task.id;
+                    res->groups = std::move(scored);
+                    res->latency_ms = std::round(ms * 10.0) / 10.0;
                     queue_results.send(std::move(res));
                 } break;
         }
@@ -5158,6 +5268,27 @@ void server_routes::init_routes() {
 
     this->post_edlm = [this](const server_http_req & req) {
         auto res = create_response();
+        std::string request_id;
+        for (const auto & [key, value] : req.headers) {
+            std::string lower = key;
+            for (char & c : lower) {
+                c = (char) std::tolower((unsigned char) c);
+            }
+            if (lower == "x-typesafe-request-id" && !value.empty()) {
+                request_id = value;
+                break;
+            }
+        }
+        if (request_id.empty()) {
+            std::uniform_int_distribution<int> dist(0, 15);
+            std::random_device rd;
+            request_id.assign(32, '0');
+            for (char & c : request_id) {
+                const int n = dist(rd);
+                c = (char) (n < 10 ? '0' + n : 'a' + (n - 10));
+            }
+        }
+        res->headers["x-typesafe-request-id"] = request_id;
         edlm_encoded encoded;
         std::string model_name = "drex-dlm";
         int n_input = 0;
@@ -5177,8 +5308,11 @@ void server_routes::init_routes() {
         {
             server_task task(SERVER_TASK_TYPE_EDLM);
             task.id = rd.get_new_id();
+            task.edlm_rows = n_input > EDLM_MAX_PACKED;
+            task.edlm_n_state = encoded.n_state;
             task.edlm_tokens = std::move(encoded.tokens);
             task.edlm_segments = std::move(encoded.segments);
+            task.edlm_positions = std::move(encoded.positions);
             for (const auto & group : encoded.groups) {
                 server_task::edlm_group item;
                 item.decide = group.decide;
@@ -5208,10 +5342,12 @@ void server_routes::init_routes() {
         }
         try {
             json answers = edlm_format_answers(scored->groups, encoded.meta);
+            const int n_output = edlm_output_tokens(ctx_server.vocab, answers);
             res->ok(json{
                 {"model", model_name},
                 {"answers", std::move(answers)},
-                {"usage", json{{"input_tokens", n_input}, {"output_tokens", 0}}},
+                {"usage", json{{"input_tokens", n_input}, {"output_tokens", n_output}}},
+                {"latency_ms", scored->latency_ms},
             });
         } catch (const std::exception & e) {
             res->error(format_error_response(e.what(), ERROR_TYPE_SERVER));

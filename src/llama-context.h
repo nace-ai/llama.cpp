@@ -106,6 +106,7 @@ struct llama_context {
     bool get_causal_attn() const;
 
     void edlm_set_segments(const int32_t * seg, int32_t n);
+    void edlm_set_positions(const llama_pos * pos, int32_t n);
     void edlm_set_readout(int32_t decide_idx, const int32_t * opt_idx, int32_t n_opt);
     void edlm_retarget_readout(int32_t decide_idx, const int32_t * opt_idx, int32_t n_opt);
     float * edlm_pointer_logits();

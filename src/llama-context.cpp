@@ -3984,10 +3984,19 @@ void llama_set_embeddings(llama_context * ctx, bool embeddings) {
 void llama_context::edlm_set_segments(const int32_t * seg, int32_t n) {
     edlm.scored = false;
     edlm.seg.clear();
+    edlm.pos.clear();
     if (seg == nullptr || n <= 0) {
         return;
     }
     edlm.seg.assign(seg, seg + n);
+}
+
+void llama_context::edlm_set_positions(const llama_pos * pos, int32_t n) {
+    edlm.pos.clear();
+    if (pos == nullptr || n <= 0) {
+        return;
+    }
+    edlm.pos.assign(pos, pos + n);
 }
 
 void llama_context::edlm_set_readout(int32_t decide_idx, const int32_t * opt_idx, int32_t n_opt) {
@@ -4100,6 +4109,10 @@ float * llama_context::edlm_pointer_logits() {
 
 void llama_edlm_set_segments(llama_context * ctx, const int32_t * seg, int32_t n) {
     ctx->edlm_set_segments(seg, n);
+}
+
+void llama_edlm_set_positions(llama_context * ctx, const llama_pos * pos, int32_t n) {
+    ctx->edlm_set_positions(pos, n);
 }
 
 void llama_edlm_set_readout(llama_context * ctx, int32_t decide_idx, const int32_t * opt_idx, int32_t n_opt) {

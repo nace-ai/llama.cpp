@@ -176,14 +176,17 @@ struct server_task {
     // used by SERVER_TASK_TYPE_SET_LORA
     std::map<int, float> set_lora; // mapping adapter ID -> scale
 
-    // used by SERVER_TASK_TYPE_EDLM. Token ids, segment ids, and one decide/option group per question.
+    // used by SERVER_TASK_TYPE_EDLM. Token ids, Kev positions, segment ids, and one decide/option group per question.
     struct edlm_group {
         int32_t decide = -1;
         std::vector<int32_t> options;
     };
     std::vector<llama_token> edlm_tokens;
     std::vector<int32_t> edlm_segments;
+    std::vector<llama_pos> edlm_positions;
     std::vector<edlm_group> edlm_groups;
+    int32_t edlm_n_state = 0;
+    bool edlm_rows = false;
 
     server_task() = default;
 
@@ -541,6 +544,7 @@ struct server_task_result_slot_save_load : server_task_result {
 
 struct server_task_result_edlm : server_task_result {
     std::vector<std::vector<float>> groups;
+    double latency_ms = 0.0;
 
     virtual json to_json() override {
         json rows = json::array();

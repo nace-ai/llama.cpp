@@ -1115,6 +1115,10 @@ extern "C" {
     // <0 pad, 0 state, >0 branch. State sees every state token. A branch sees state and its own earlier tokens.
     LLAMA_API void llama_edlm_set_segments(struct llama_context * ctx, const int32_t * seg, int32_t n);
 
+    // RoPE positions for that encode. n must equal n_tokens. NULL clears.
+    // These may restart at the state length for each branch. batch.pos stays monotonic.
+    LLAMA_API void llama_edlm_set_positions(struct llama_context * ctx, const llama_pos * pos, int32_t n);
+
     // Score option endpoints against decide_idx. Result is pointer logits, not token ids.
     // Enables embedding extraction. Call again before the batch, then llama_decode / llama_encode.
     LLAMA_API void llama_edlm_set_readout(struct llama_context * ctx, int32_t decide_idx, const int32_t * opt_idx, int32_t n_opt);

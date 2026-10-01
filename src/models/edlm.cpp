@@ -15,6 +15,8 @@ struct llm_graph_input_edlm : public llm_graph_input_attn_no_cache {
     llm_graph_input_edlm(const llama_hparams & hparams, const llama_cparams & cparams) :
         llm_graph_input_attn_no_cache(hparams, cparams) {}
 
+    ggml_tensor * rope_pos = nullptr;
+
     void set_input(const llama_ubatch * ubatch) override;
 };
 
@@ -27,6 +29,12 @@ static int32_t edlm_src(const llama_ubatch * ubatch, int32_t i) {
 
 void llm_graph_input_edlm::set_input(const llama_ubatch * ubatch) {
     const int64_t n_tokens = ubatch->n_tokens;
+    if (rope_pos && cparams.edlm && cparams.edlm->pos.size() == (size_t) n_tokens && rope_pos->ne[0] == n_tokens) {
+        ggml_backend_tensor_set(rope_pos, cparams.edlm->pos.data(), 0, (size_t) n_tokens * sizeof(llama_pos));
+    } else if (cparams.edlm && !cparams.edlm->pos.empty()) {
+        LLAMA_LOG_WARN("%s: edlm positions %zu != n_tokens %" PRId64 ", using batch positions\n",
+                __func__, cparams.edlm->pos.size(), n_tokens);
+    }
     const bool have_seg = cparams.edlm && cparams.edlm->seg.size() == (size_t) n_tokens;
     if (!have_seg) {
         if (cparams.edlm && !cparams.edlm->seg.empty()) {
@@ -149,6 +157,7 @@ llama_model_edlm::graph::graph(const llama_model & model, const llm_graph_params
     ggml_tensor * inp_pos = build_inp_pos();
 
     auto inp_owned = std::make_unique<llm_graph_input_edlm>(hparams, cparams);
+    inp_owned->rope_pos = inp_pos;
     const auto type_mask = cparams.flash_attn ? GGML_TYPE_F16 : GGML_TYPE_F32;
     inp_owned->self_kq_mask = ggml_new_tensor_4d(ctx0, type_mask, n_tokens, n_tokens, 1, 1);
     ggml_set_input(inp_owned->self_kq_mask);

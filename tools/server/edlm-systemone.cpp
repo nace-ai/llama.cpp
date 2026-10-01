@@ -3,16 +3,13 @@
 #include "common.h"
 
 #include <cmath>
+#include <cstdio>
+#include <cstdint>
 #include <regex>
 #include <sstream>
 #include <stdexcept>
 
 namespace {
-
-constexpr int kMaxOptions = 255;
-constexpr int kMaxState = 8192;
-constexpr int kMaxBranch = 8192;
-constexpr int kMaxPacked = 16384;
 
 const char * kDelims[] = {
     "<|fim_prefix|>",
@@ -155,7 +152,7 @@ edlm_encoded edlm_encode_systemone(const llama_vocab * vocab, const json & body)
     }
 
     const std::vector<llama_token> state_tokens = user_tokens(vocab, render_value(body.at("state"), 0));
-    if ((int) state_tokens.size() + 1 > kMaxState) {
+    if ((int) state_tokens.size() + 1 > EDLM_MAX_STATE) {
         throw std::runtime_error("state exceeds 8192 tokens");
     }
 
@@ -163,6 +160,11 @@ edlm_encoded edlm_encode_systemone(const llama_vocab * vocab, const json & body)
     out.tokens.push_back(delim[0]);
     out.tokens.insert(out.tokens.end(), state_tokens.begin(), state_tokens.end());
     out.segments.assign(out.tokens.size(), 0);
+    out.n_state = (int32_t) out.tokens.size();
+    out.positions.resize(out.tokens.size());
+    for (int32_t i = 0; i < out.n_state; ++i) {
+        out.positions[i] = i;
+    }
 
     int question_id = 0;
     for (const auto & [qid, question] : body.at("questions").items()) {
@@ -211,7 +213,7 @@ edlm_encoded edlm_encode_systemone(const llama_vocab * vocab, const json & body)
         } else {
             throw std::runtime_error("question type must be choice, noul, or score");
         }
-        if (options.empty() || (int) options.size() > kMaxOptions) {
+        if (options.empty() || (int) options.size() > EDLM_MAX_OPTIONS) {
             throw std::runtime_error("a question needs 1 to 255 options");
         }
 
@@ -232,17 +234,18 @@ edlm_encoded edlm_encode_systemone(const llama_vocab * vocab, const json & body)
             ends.push_back((int) branch.size() - 1);
         }
         branch.push_back(delim[4]);
-        if ((int) branch.size() > kMaxBranch - (int) out.segments.size()) {
+        if ((int) branch.size() > EDLM_MAX_BRANCH - (int) out.n_state) {
             throw std::runtime_error("question branch exceeds the 8192-token row limit");
-        }
-        if ((int) out.tokens.size() + (int) branch.size() > kMaxPacked) {
-            throw std::runtime_error("request exceeds 16384 tokens");
         }
 
         ++question_id;
         const int base = (int) out.tokens.size();
+        const int32_t p0 = out.n_state;
         out.tokens.insert(out.tokens.end(), branch.begin(), branch.end());
         out.segments.insert(out.segments.end(), branch.size(), question_id);
+        for (int32_t i = 0; i < (int32_t) branch.size(); ++i) {
+            out.positions.push_back(p0 + i);
+        }
         edlm_encoded_group group;
         group.decide = base + (int) branch.size() - 1;
         for (int end : ends) {
@@ -250,6 +253,9 @@ edlm_encoded edlm_encode_systemone(const llama_vocab * vocab, const json & body)
         }
         out.groups.push_back(std::move(group));
         out.meta.push_back(std::move(meta));
+    }
+    if (out.positions.size() != out.tokens.size() || out.segments.size() != out.tokens.size()) {
+        throw std::runtime_error("encoder layout mismatch");
     }
     return out;
 }
@@ -306,4 +312,114 @@ json edlm_format_answers(const std::vector<std::vector<float>> & logits, const s
         answers[meta[q].id] = std::move(item);
     }
     return answers;
+}
+
+static std::string py_float(double value) {
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%.4f", value);
+    std::string text(buf);
+    const auto dot = text.find('.');
+    if (dot == std::string::npos) {
+        return text + ".0";
+    }
+    while (text.size() > dot + 2 && text.back() == '0') {
+        text.pop_back();
+    }
+    return text;
+}
+
+static void append_py_string(std::string & out, const std::string & text) {
+    out.push_back('"');
+    for (size_t i = 0; i < text.size();) {
+        const unsigned char c = (unsigned char) text[i];
+        if (c == '"') { out += "\\\""; ++i; continue; }
+        if (c == '\\') { out += "\\\\"; ++i; continue; }
+        if (c == '\b') { out += "\\b"; ++i; continue; }
+        if (c == '\f') { out += "\\f"; ++i; continue; }
+        if (c == '\n') { out += "\\n"; ++i; continue; }
+        if (c == '\r') { out += "\\r"; ++i; continue; }
+        if (c == '\t') { out += "\\t"; ++i; continue; }
+        uint32_t cp = c;
+        size_t n = 1;
+        bool ok = true;
+        if (c >= 0x80) {
+            if ((c & 0xE0) == 0xC0 && i + 1 < text.size()) {
+                cp = ((uint32_t) (c & 0x1F) << 6) | ((unsigned char) text[i + 1] & 0x3F);
+                n = 2;
+                ok = (c & 0xFE) != 0xC0;
+            } else if ((c & 0xF0) == 0xE0 && i + 2 < text.size()) {
+                cp = ((uint32_t) (c & 0x0F) << 12) | (((unsigned char) text[i + 1] & 0x3F) << 6) | ((unsigned char) text[i + 2] & 0x3F);
+                n = 3;
+                ok = cp >= 0x800;
+            } else if ((c & 0xF8) == 0xF0 && i + 3 < text.size()) {
+                cp = ((uint32_t) (c & 0x07) << 18) | (((unsigned char) text[i + 1] & 0x3F) << 12) |
+                     (((unsigned char) text[i + 2] & 0x3F) << 6) | ((unsigned char) text[i + 3] & 0x3F);
+                n = 4;
+                ok = cp >= 0x10000 && cp <= 0x10FFFF;
+            } else {
+                ok = false;
+            }
+        }
+        if (!ok) {
+            out += "\\ufffd";
+            ++i;
+            continue;
+        }
+        if (cp < 0x20 || cp >= 0x80) {
+            char esc[16];
+            if (cp >= 0x10000) {
+                const uint32_t u = cp - 0x10000;
+                std::snprintf(esc, sizeof(esc), "\\u%04x\\u%04x", 0xD800 + (u >> 10), 0xDC00 + (u & 0x3FF));
+            } else {
+                std::snprintf(esc, sizeof(esc), "\\u%04x", cp);
+            }
+            out += esc;
+        } else {
+            out.push_back((char) cp);
+        }
+        i += n;
+    }
+    out.push_back('"');
+}
+
+static void append_py_json(std::string & out, const json & value) {
+    if (value.is_null()) {
+        out += "null";
+    } else if (value.is_boolean()) {
+        out += value.get<bool>() ? "true" : "false";
+    } else if (value.is_string()) {
+        append_py_string(out, value.get<std::string>());
+    } else if (value.is_number()) {
+        out += py_float(value.get<double>());
+    } else if (value.is_array()) {
+        out.push_back('[');
+        for (size_t i = 0; i < value.size(); ++i) {
+            if (i) {
+                out += ", ";
+            }
+            append_py_json(out, value.at(i));
+        }
+        out.push_back(']');
+    } else if (value.is_object()) {
+        out.push_back('{');
+        bool first = true;
+        for (const auto & [key, child] : value.items()) {
+            if (!first) {
+                out += ", ";
+            }
+            first = false;
+            append_py_string(out, key);
+            out += ": ";
+            append_py_json(out, child);
+        }
+        out.push_back('}');
+    } else {
+        throw std::runtime_error("answer could not be serialized");
+    }
+}
+
+int edlm_output_tokens(const llama_vocab * vocab, const json & answers) {
+    std::string text;
+    append_py_json(text, answers);
+    return (int) common_tokenize(vocab, text, false, false).size();
 }
