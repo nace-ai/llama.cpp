@@ -1,4 +1,4 @@
-#include "edlm-systemone.h"
+#include "systemone.h"
 
 #include "common.h"
 
@@ -138,7 +138,7 @@ std::vector<double> softmax(const std::vector<float> & logits) {
 
 }  // namespace
 
-edlm_encoded edlm_encode_systemone(const llama_vocab * vocab, const json & body) {
+systemone_encoded systemone_encode(const llama_vocab * vocab, const json & body) {
     if (!body.is_object() || !body.contains("state") || !body.contains("questions") || !body.at("questions").is_object()) {
         throw std::runtime_error("request needs state and questions");
     }
@@ -152,11 +152,11 @@ edlm_encoded edlm_encode_systemone(const llama_vocab * vocab, const json & body)
     }
 
     const std::vector<llama_token> state_tokens = user_tokens(vocab, render_value(body.at("state"), 0));
-    if ((int) state_tokens.size() + 1 > EDLM_MAX_STATE) {
+    if ((int) state_tokens.size() + 1 > SYSTEMONE_MAX_STATE) {
         throw std::runtime_error("state exceeds 8192 tokens");
     }
 
-    edlm_encoded out;
+    systemone_encoded out;
     out.tokens.push_back(delim[0]);
     out.tokens.insert(out.tokens.end(), state_tokens.begin(), state_tokens.end());
     out.segments.assign(out.tokens.size(), 0);
@@ -172,7 +172,7 @@ edlm_encoded edlm_encode_systemone(const llama_vocab * vocab, const json & body)
             throw std::runtime_error("each question needs a type");
         }
         const std::string type = question.at("type").get<std::string>();
-        edlm_question_meta meta;
+        systemone_question meta;
         meta.id = qid;
         meta.type = type;
 
@@ -213,7 +213,7 @@ edlm_encoded edlm_encode_systemone(const llama_vocab * vocab, const json & body)
         } else {
             throw std::runtime_error("question type must be choice, noul, or score");
         }
-        if (options.empty() || (int) options.size() > EDLM_MAX_OPTIONS) {
+        if (options.empty() || (int) options.size() > SYSTEMONE_MAX_OPTIONS) {
             throw std::runtime_error("a question needs 1 to 255 options");
         }
 
@@ -234,7 +234,7 @@ edlm_encoded edlm_encode_systemone(const llama_vocab * vocab, const json & body)
             ends.push_back((int) branch.size() - 1);
         }
         branch.push_back(delim[4]);
-        if ((int) branch.size() > EDLM_MAX_BRANCH - (int) out.n_state) {
+        if ((int) branch.size() > SYSTEMONE_MAX_BRANCH - (int) out.n_state) {
             throw std::runtime_error("question branch exceeds the 8192-token row limit");
         }
 
@@ -246,7 +246,7 @@ edlm_encoded edlm_encode_systemone(const llama_vocab * vocab, const json & body)
         for (int32_t i = 0; i < (int32_t) branch.size(); ++i) {
             out.positions.push_back(p0 + i);
         }
-        edlm_encoded_group group;
+        systemone_group group;
         group.decide = base + (int) branch.size() - 1;
         for (int end : ends) {
             group.options.push_back(base + end);
@@ -260,7 +260,7 @@ edlm_encoded edlm_encode_systemone(const llama_vocab * vocab, const json & body)
     return out;
 }
 
-json edlm_format_answers(const std::vector<std::vector<float>> & logits, const std::vector<edlm_question_meta> & meta) {
+json systemone_format_answers(const std::vector<std::vector<float>> & logits, const std::vector<systemone_question> & meta) {
     if (logits.size() != meta.size()) {
         throw std::runtime_error("pointer readout did not return one group per question");
     }
@@ -418,7 +418,7 @@ static void append_py_json(std::string & out, const json & value) {
     }
 }
 
-int edlm_output_tokens(const llama_vocab * vocab, const json & answers) {
+int systemone_output_tokens(const llama_vocab * vocab, const json & answers) {
     std::string text;
     append_py_json(text, answers);
     return (int) common_tokenize(vocab, text, false, false).size();

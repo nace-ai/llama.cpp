@@ -1,5 +1,5 @@
 #include "server-context.h"
-#include "edlm-systemone.h"
+#include "systemone.h"
 #include "server-chat.h"
 #include "server-common.h"
 #include "server-http.h"
@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstring>
 #include <cmath>
 #include <cstddef>
 #include <cinttypes>
@@ -2707,23 +2708,44 @@ private:
                     res->id = task.id;
                     queue_results.send(std::move(res));
                 } break;
-            case SERVER_TASK_TYPE_EDLM:
+            case SERVER_TASK_TYPE_SYSTEMONE:
                 {
-                    auto fail = [&](const std::string & message) {
-                        if (ctx_tgt) {
+                    auto arch_is = [&](const char * name) -> bool {
+                        if (!ctx_tgt) {
+                            return false;
+                        }
+                        const llama_model * model = llama_get_model(ctx_tgt);
+                        if (!model) {
+                            return false;
+                        }
+                        char buf[64];
+                        const int n = llama_model_meta_val_str(model, "general.architecture", buf, sizeof(buf));
+                        return n > 0 && std::strcmp(buf, name) == 0;
+                    };
+                    auto fail = [&](const std::string & message, error_type type = ERROR_TYPE_INVALID_REQUEST) {
+                        if (ctx_tgt && arch_is("edlm")) {
                             llama_edlm_set_segments(ctx_tgt, nullptr, 0);
                         }
                         auto err = std::make_unique<server_task_result_error>();
                         err->id = task.id;
-                        err->err_type = ERROR_TYPE_INVALID_REQUEST;
+                        err->err_type = type;
                         err->err_msg = message;
                         queue_results.send(std::move(err));
                     };
-                    const int n_all = (int) task.edlm_tokens.size();
-                    if (!ctx_tgt || n_all <= 0 || (int) task.edlm_segments.size() != n_all ||
-                            (int) task.edlm_positions.size() != n_all || task.edlm_groups.empty() ||
-                            task.edlm_n_state <= 0 || task.edlm_n_state > n_all) {
-                        fail("edlm request is empty or the model is not loaded");
+                    const int n_all = (int) task.systemone_tokens.size();
+                    if (!ctx_tgt) {
+                        fail("model is not loaded");
+                        break;
+                    }
+                    // First backend. Another architecture that can score this record plugs in here.
+                    if (!arch_is("edlm")) {
+                        fail("loaded model cannot score System One", ERROR_TYPE_NOT_SUPPORTED);
+                        break;
+                    }
+                    if (n_all <= 0 || (int) task.systemone_segments.size() != n_all ||
+                            (int) task.systemone_positions.size() != n_all || task.systemone_groups.empty() ||
+                            task.systemone_n_state <= 0 || task.systemone_n_state > n_all) {
+                        fail("systemone request is empty");
                         break;
                     }
                     bool busy = false;
@@ -2734,24 +2756,24 @@ private:
                         }
                     }
                     if (busy) {
-                        fail("edlm encode needs the context idle");
+                        fail("systemone encode needs the context idle");
                         break;
                     }
                     auto encode_span = [&](const std::vector<llama_token> & tokens,
                                            const std::vector<int32_t> & segments,
                                            const std::vector<llama_pos> & positions,
-                                           const std::vector<server_task::edlm_group> & groups,
+                                           const std::vector<server_task::systemone_group> & groups,
                                            std::vector<std::vector<float>> & out) -> bool {
                         const int n = (int) tokens.size();
                         if (n <= 0 || (int) segments.size() != n || (int) positions.size() != n || groups.empty()) {
-                            fail("edlm batch is malformed");
+                            fail("systemone batch is malformed");
                             return false;
                         }
                         const uint32_t n_ctx = llama_n_ctx(ctx_tgt);
                         const uint32_t n_batch = llama_n_batch(ctx_tgt);
                         const uint32_t n_ubatch = llama_n_ubatch(ctx_tgt);
                         if ((uint32_t) n > n_ctx || (uint32_t) n > n_batch || (uint32_t) n > n_ubatch) {
-                            fail("edlm batch of " + std::to_string(n) + " tokens does not fit n_ctx=" +
+                            fail("systemone batch of " + std::to_string(n) + " tokens does not fit n_ctx=" +
                                  std::to_string(n_ctx) + " n_batch=" + std::to_string(n_batch) +
                                  " n_ubatch=" + std::to_string(n_ubatch) + "; raise -c -b -ub");
                             return false;
@@ -2764,7 +2786,7 @@ private:
                         batch.n_tokens = n;
                         for (int i = 0; i < n; ++i) {
                             batch.token[i] = tokens[i];
-                            // The batch allocator rejects a position restart. RoPE reads edlm positions instead.
+                            // The batch allocator rejects a position restart. RoPE reads the System One positions instead.
                             batch.pos[i] = i;
                             batch.n_seq_id[i] = 1;
                             batch.seq_id[i][0] = 0;
@@ -2773,12 +2795,12 @@ private:
                         const int rc = llama_encode(ctx_tgt, batch);
                         llama_batch_free(batch);
                         if (rc != 0) {
-                            fail("edlm encode failed");
+                            fail("systemone encode failed");
                             return false;
                         }
                         for (const auto & group : groups) {
                             if (group.decide < 0 || group.decide >= n || group.options.empty()) {
-                                fail("edlm readout is outside the batch");
+                                fail("systemone readout is outside the batch");
                                 return false;
                             }
                             llama_edlm_retarget_readout(ctx_tgt, group.decide, group.options.data(), (int32_t) group.options.size());
@@ -2795,30 +2817,30 @@ private:
                     const auto t0 = std::chrono::steady_clock::now();
                     std::vector<std::vector<float>> scored;
                     bool ok = true;
-                    if (!task.edlm_rows) {
-                        ok = encode_span(task.edlm_tokens, task.edlm_segments, task.edlm_positions, task.edlm_groups, scored);
+                    if (!task.systemone_rows) {
+                        ok = encode_span(task.systemone_tokens, task.systemone_segments, task.systemone_positions, task.systemone_groups, scored);
                     } else {
-                        const int n_state = task.edlm_n_state;
+                        const int n_state = task.systemone_n_state;
                         for (int i = 0; i < n_state; ++i) {
-                            if (task.edlm_segments[i] != 0) {
-                                fail("edlm row layout is malformed");
+                            if (task.systemone_segments[i] != 0) {
+                                fail("systemone row layout is malformed");
                                 ok = false;
                                 break;
                             }
                         }
                         int cursor = n_state;
-                        for (const auto & group : task.edlm_groups) {
+                        for (const auto & group : task.systemone_groups) {
                             if (!ok) {
                                 break;
                             }
                             if (group.decide < cursor || group.decide >= n_all) {
-                                fail("edlm row layout is malformed");
+                                fail("systemone row layout is malformed");
                                 ok = false;
                                 break;
                             }
                             for (int i = cursor; i <= group.decide; ++i) {
-                                if (task.edlm_segments[i] <= 0) {
-                                    fail("edlm row layout is malformed");
+                                if (task.systemone_segments[i] <= 0) {
+                                    fail("systemone row layout is malformed");
                                     ok = false;
                                     break;
                                 }
@@ -2827,17 +2849,17 @@ private:
                                 break;
                             }
                             const int end = group.decide + 1;
-                            std::vector<llama_token> tokens(task.edlm_tokens.begin(), task.edlm_tokens.begin() + n_state);
-                            tokens.insert(tokens.end(), task.edlm_tokens.begin() + cursor, task.edlm_tokens.begin() + end);
-                            std::vector<llama_pos> positions(task.edlm_positions.begin(), task.edlm_positions.begin() + n_state);
-                            positions.insert(positions.end(), task.edlm_positions.begin() + cursor, task.edlm_positions.begin() + end);
+                            std::vector<llama_token> tokens(task.systemone_tokens.begin(), task.systemone_tokens.begin() + n_state);
+                            tokens.insert(tokens.end(), task.systemone_tokens.begin() + cursor, task.systemone_tokens.begin() + end);
+                            std::vector<llama_pos> positions(task.systemone_positions.begin(), task.systemone_positions.begin() + n_state);
+                            positions.insert(positions.end(), task.systemone_positions.begin() + cursor, task.systemone_positions.begin() + end);
                             std::vector<int32_t> segments(n_state, 0);
-                            segments.insert(segments.end(), task.edlm_segments.begin() + cursor, task.edlm_segments.begin() + end);
-                            server_task::edlm_group rel;
+                            segments.insert(segments.end(), task.systemone_segments.begin() + cursor, task.systemone_segments.begin() + end);
+                            server_task::systemone_group rel;
                             rel.decide = n_state + (group.decide - cursor);
                             for (int32_t opt : group.options) {
                                 if (opt < cursor || opt > group.decide) {
-                                    fail("edlm readout is outside the batch");
+                                    fail("systemone readout is outside the batch");
                                     ok = false;
                                     break;
                                 }
@@ -2846,13 +2868,13 @@ private:
                             if (!ok) {
                                 break;
                             }
-                            std::vector<server_task::edlm_group> one;
+                            std::vector<server_task::systemone_group> one;
                             one.push_back(std::move(rel));
                             ok = encode_span(tokens, segments, positions, one, scored);
                             cursor = end;
                         }
                         if (ok && cursor != n_all) {
-                            fail("edlm row layout is malformed");
+                            fail("systemone row layout is malformed");
                             ok = false;
                         }
                     }
@@ -2860,7 +2882,7 @@ private:
                         break;
                     }
                     const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-                    auto res = std::make_unique<server_task_result_edlm>();
+                    auto res = std::make_unique<server_task_result_systemone>();
                     res->id = task.id;
                     res->groups = std::move(scored);
                     res->latency_ms = std::round(ms * 10.0) / 10.0;
@@ -5266,7 +5288,7 @@ void server_routes::init_routes() {
         return res;
     };
 
-    this->post_edlm = [this](const server_http_req & req) {
+    this->post_systemone = [this](const server_http_req & req) {
         auto res = create_response();
         std::string request_id;
         for (const auto & [key, value] : req.headers) {
@@ -5289,15 +5311,18 @@ void server_routes::init_routes() {
             }
         }
         res->headers["x-typesafe-request-id"] = request_id;
-        edlm_encoded encoded;
-        std::string model_name = "drex-dlm";
+        systemone_encoded encoded;
+        std::string model_name = meta && !meta->model_name.empty() ? meta->model_name : std::string();
         int n_input = 0;
         try {
             const json body = json::parse(req.body);
             if (body.contains("model") && body.at("model").is_string()) {
-                model_name = body.at("model").get<std::string>();
+                const std::string requested = body.at("model").get<std::string>();
+                if (!requested.empty()) {
+                    model_name = requested;
+                }
             }
-            encoded = edlm_encode_systemone(ctx_server.vocab, body);
+            encoded = systemone_encode(ctx_server.vocab, body);
             n_input = (int) encoded.tokens.size();
         } catch (const std::exception & e) {
             res->error(format_error_response(e.what(), ERROR_TYPE_INVALID_REQUEST));
@@ -5306,18 +5331,18 @@ void server_routes::init_routes() {
 
         auto & rd = res->rd;
         {
-            server_task task(SERVER_TASK_TYPE_EDLM);
+            server_task task(SERVER_TASK_TYPE_SYSTEMONE);
             task.id = rd.get_new_id();
-            task.edlm_rows = n_input > EDLM_MAX_PACKED;
-            task.edlm_n_state = encoded.n_state;
-            task.edlm_tokens = std::move(encoded.tokens);
-            task.edlm_segments = std::move(encoded.segments);
-            task.edlm_positions = std::move(encoded.positions);
+            task.systemone_rows = n_input > SYSTEMONE_MAX_PACKED;
+            task.systemone_n_state = encoded.n_state;
+            task.systemone_tokens = std::move(encoded.tokens);
+            task.systemone_segments = std::move(encoded.segments);
+            task.systemone_positions = std::move(encoded.positions);
             for (const auto & group : encoded.groups) {
-                server_task::edlm_group item;
+                server_task::systemone_group item;
                 item.decide = group.decide;
                 item.options = group.options;
-                task.edlm_groups.push_back(std::move(item));
+                task.systemone_groups.push_back(std::move(item));
             }
             std::vector<server_task> tasks;
             tasks.push_back(std::move(task));
@@ -5332,17 +5357,17 @@ void server_routes::init_routes() {
             return res;
         }
         if (all_results.results.size() != 1) {
-            res->error(format_error_response("edlm readout returned no result", ERROR_TYPE_SERVER));
+            res->error(format_error_response("systemone readout returned no result", ERROR_TYPE_SERVER));
             return res;
         }
-        auto * scored = dynamic_cast<server_task_result_edlm *>(all_results.results[0].get());
+        auto * scored = dynamic_cast<server_task_result_systemone *>(all_results.results[0].get());
         if (!scored) {
-            res->error(format_error_response("edlm readout returned the wrong result", ERROR_TYPE_SERVER));
+            res->error(format_error_response("systemone readout returned the wrong result", ERROR_TYPE_SERVER));
             return res;
         }
         try {
-            json answers = edlm_format_answers(scored->groups, encoded.meta);
-            const int n_output = edlm_output_tokens(ctx_server.vocab, answers);
+            json answers = systemone_format_answers(scored->groups, encoded.meta);
+            const int n_output = systemone_output_tokens(ctx_server.vocab, answers);
             res->ok(json{
                 {"model", model_name},
                 {"answers", std::move(answers)},

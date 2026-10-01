@@ -15,8 +15,8 @@ add_library(${TARGET} STATIC
     server-common.h
     server-context.cpp
     server-context.h
-    edlm-systemone.cpp
-    edlm-systemone.h
+    systemone.cpp
+    systemone.h
     server-stream.cpp
     server-stream.h
     server-tools.cpp
