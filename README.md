@@ -17,6 +17,16 @@
 
 </div>
 
+## Drex DLM
+
+This branch serves [Drex DLM](https://huggingface.co/nace-ai/drex-dlm). The architecture is `edlm`. `llama-server` answers `POST /v1/systemone`.
+
+```bash
+git clone --branch edlm https://github.com/nace-ai/llama.cpp.git
+```
+
+Build `llama-server`, convert the model, and start it as described in [nace-ai/drex-dlm](https://github.com/nace-ai/drex-dlm).
+
 ## Quick start
 
 A few options to get `llama.cpp` installed on your machine:
