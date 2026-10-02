@@ -19,7 +19,7 @@
 
 ## Drex DLM
 
-This branch serves [Drex DLM](https://huggingface.co/nace-ai/drex-dlm). The architecture is `edlm`. `llama-server` answers `POST /v1/systemone`.
+This branch serves [Drex DLM](https://huggingface.co/nace-ai/drex-dlm). The architecture is `edlm`. `llama-server` answers `POST /v1/systemone`. The context length is 32,768 tokens. The recommended default is 16,384. `SYSTEMONE_CONTEXT=32768` selects the full window; also pass `-c 32768 -b 32768 -ub 32768`.
 
 ```bash
 git clone --branch edlm https://github.com/nace-ai/llama.cpp.git

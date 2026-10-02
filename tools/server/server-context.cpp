@@ -5333,7 +5333,7 @@ void server_routes::init_routes() {
         {
             server_task task(SERVER_TASK_TYPE_SYSTEMONE);
             task.id = rd.get_new_id();
-            task.systemone_rows = n_input > SYSTEMONE_MAX_PACKED;
+            task.systemone_rows = n_input > systemone_limit("SYSTEMONE_MAX_PACKED");
             task.systemone_n_state = encoded.n_state;
             task.systemone_tokens = std::move(encoded.tokens);
             task.systemone_segments = std::move(encoded.segments);

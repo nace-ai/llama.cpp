@@ -152,8 +152,9 @@ systemone_encoded systemone_encode(const llama_vocab * vocab, const json & body)
     }
 
     const std::vector<llama_token> state_tokens = user_tokens(vocab, render_value(body.at("state"), 0));
-    if ((int) state_tokens.size() + 1 > SYSTEMONE_MAX_STATE) {
-        throw std::runtime_error("state exceeds 8192 tokens");
+    const int max_state = systemone_limit("SYSTEMONE_MAX_STATE");
+    if ((int) state_tokens.size() + 1 > max_state) {
+        throw std::runtime_error("state exceeds " + std::to_string(max_state) + " tokens");
     }
 
     systemone_encoded out;
@@ -234,8 +235,9 @@ systemone_encoded systemone_encode(const llama_vocab * vocab, const json & body)
             ends.push_back((int) branch.size() - 1);
         }
         branch.push_back(delim[4]);
-        if ((int) branch.size() > SYSTEMONE_MAX_BRANCH - (int) out.n_state) {
-            throw std::runtime_error("question branch exceeds the 8192-token row limit");
+        const int max_branch = systemone_limit("SYSTEMONE_MAX_BRANCH");
+        if ((int) branch.size() > max_branch - (int) out.n_state) {
+            throw std::runtime_error("question branch exceeds the " + std::to_string(max_branch) + "-token row limit");
         }
 
         ++question_id;
