@@ -2,11 +2,12 @@
 
 #include "common.h"
 
+#include <array>
+#include <charconv>
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
 #include <regex>
-#include <sstream>
 #include <stdexcept>
 
 namespace {
@@ -26,6 +27,50 @@ std::string shield_specials(const std::string & text) {
     return std::regex_replace(text, re, "<\xC2\xA6$1\xC2\xA6>");
 }
 
+std::string render_float(double value) {
+    if (!std::isfinite(value)) {
+        throw std::runtime_error("numbers must be finite");
+    }
+    std::array<char, 64> buffer{};
+    const auto converted = std::to_chars(buffer.data(), buffer.data() + buffer.size(), std::fabs(value), std::chars_format::scientific);
+    if (converted.ec != std::errc()) {
+        throw std::runtime_error("could not render number");
+    }
+    const std::string scientific(buffer.data(), converted.ptr);
+    const size_t e = scientific.find('e');
+    const int exponent = std::stoi(scientific.substr(e + 1));
+    std::string digits;
+    for (size_t i = 0; i < e; ++i) {
+        if (scientific[i] != '.') {
+            digits += scientific[i];
+        }
+    }
+    std::string out = std::signbit(value) ? "-" : "";
+    // Match Python str(float): shortest digits, with fixed notation for exponents -4 through 15.
+    if (exponent >= -4 && exponent < 16) {
+        const int point = exponent + 1;
+        if (point <= 0) {
+            out += "0." + std::string(-point, '0') + digits;
+        } else if (point >= static_cast<int>(digits.size())) {
+            out += digits + std::string(point - digits.size(), '0') + ".0";
+        } else {
+            out += digits.substr(0, point) + "." + digits.substr(point);
+        }
+    } else {
+        out += digits.substr(0, 1);
+        if (digits.size() > 1) {
+            out += "." + digits.substr(1);
+        }
+        std::string power = std::to_string(std::abs(exponent));
+        if (power.size() < 2) {
+            power.insert(0, 1, '0');
+        }
+        out += exponent < 0 ? "e-" : "e+";
+        out += power;
+    }
+    return out;
+}
+
 std::string render_scalar(const json & value) {
     if (value.is_null()) {
         return "";
@@ -37,12 +82,10 @@ std::string render_scalar(const json & value) {
         return value.get<bool>() ? "True" : "False";
     }
     if (value.is_number_integer()) {
-        return std::to_string(value.get<long long>());
+        return value.dump();
     }
     if (value.is_number()) {
-        std::ostringstream out;
-        out << value.get<double>();
-        return out.str();
+        return render_float(value.get<double>());
     }
     return render_value(value, 0);
 }
@@ -99,14 +142,34 @@ std::vector<llama_token> user_tokens(const llama_vocab * vocab, const std::strin
 }
 
 std::string option_text(const std::string & name, const json * desc) {
-    if (desc == nullptr || desc->is_null()) {
+    if (desc == nullptr || desc->is_null() || (desc->is_string() && desc->get<std::string>().empty())) {
         return name;
     }
-    const std::string rendered = render_value(*desc, 0);
-    if (rendered.empty()) {
-        return name;
+    return name + ": " + render_value(*desc, 0);
+}
+
+void validate_request(const json & body) {
+    if (body.is_object() && body.contains("requests")) {
+        throw std::runtime_error("requests batch wrapper is not supported; send one state and questions object");
     }
-    return name + ": " + rendered;
+    if (!body.is_object() || !body.contains("state") || !body.contains("questions") || !body.at("questions").is_object()) {
+        throw std::runtime_error("request needs state and questions");
+    }
+    if (body.at("questions").size() == 0) {
+        throw std::runtime_error("request needs at least one question");
+    }
+    for (const auto & [qid, question] : body.at("questions").items()) {
+        (void) qid;
+        if (!question.is_object() || !question.contains("type") || !question.at("type").is_string()) {
+            throw std::runtime_error("each question needs a type");
+        }
+        if (question.at("type").get<std::string>() == "noul" && question.contains("criteria")) {
+            const auto & criteria = question.at("criteria");
+            if (!criteria.is_null() && !criteria.is_object()) {
+                throw std::runtime_error("noul criteria must be an object or null");
+            }
+        }
+    }
 }
 
 double round4(double value) {
@@ -139,12 +202,7 @@ std::vector<double> softmax(const std::vector<float> & logits) {
 }  // namespace
 
 systemone_encoded systemone_encode(const llama_vocab * vocab, const json & body) {
-    if (!body.is_object() || !body.contains("state") || !body.contains("questions") || !body.at("questions").is_object()) {
-        throw std::runtime_error("request needs state and questions");
-    }
-    if (body.at("questions").size() == 0) {
-        throw std::runtime_error("request needs at least one question");
-    }
+    validate_request(body);
 
     llama_token delim[5];
     for (int i = 0; i < 5; ++i) {
@@ -169,9 +227,6 @@ systemone_encoded systemone_encode(const llama_vocab * vocab, const json & body)
 
     int question_id = 0;
     for (const auto & [qid, question] : body.at("questions").items()) {
-        if (!question.is_object() || !question.contains("type") || !question.at("type").is_string()) {
-            throw std::runtime_error("each question needs a type");
-        }
         const std::string type = question.at("type").get<std::string>();
         systemone_question meta;
         meta.id = qid;
@@ -296,13 +351,13 @@ json systemone_format_answers(const std::vector<std::vector<float>> & logits, co
             double score = 0.0;
             double spread = 0.0;
             json dist = json::object();
-            json legend = json::object();
+            json legend = json::array();
             for (size_t i = 0; i < probs.size(); ++i) {
                 score += (double) i * probs[i];
                 spread += probs[i] * std::fabs((double) i - (double) best);
                 dist[meta[q].keys[i]] = round4(probs[i]);
                 if (i < meta[q].legend.size()) {
-                    legend[meta[q].keys[i]] = meta[q].legend[i];
+                    legend.push_back(meta[q].legend[i]);
                 }
             }
             const double confidence = probs.size() == 1 ? 1.0 : 1.0 - spread / (double) (probs.size() - 1);
