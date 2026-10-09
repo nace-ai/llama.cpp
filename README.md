@@ -41,8 +41,8 @@ python convert_hf_to_gguf.py /path/to/drex-v1.5 --outfile drex-v1.5.gguf --outty
 llama-server -m drex-v1.5.gguf --port 8097 -np 2 -c 32768 -b 16384 -ub 2048 --embedding --pooling none
 ```
 
-- Checked on the real weights against the Python Kev scorer (CUDA, bf16): token counts match, probabilities differ by at most 0.008 and no choice differs. Q8_0 differs by at most 0.034.
-- Metal was checked only on a small random model, with and without `GGML_METAL_TENSOR_DISABLE=1`. Both passed. If Metal output looks wrong on the real model, try that variable.
+- Tested on an AWS g5.2xlarge (NVIDIA A10G 24 GB, 8 vCPU AMD EPYC 7R32, 32 GiB RAM, Ubuntu 24.04, CUDA 13.2), against the Python Kev scorer on two requests (87 and 5,104 tokens, six questions): token counts match, probabilities differ by at most 0.0075 in bf16 and 0.034 in Q8_0, and every answer is the same.
+- On an Apple M5 Pro (18-core CPU, 20-core GPU, 48 GB unified memory, macOS 26.5.2) the Q8_0 model gives the same answers on Metal (probabilities within 0.019 of the Python scorer, 0.57 s for the 87-token request) and on the CPU (within 0.035). Build with `cmake -B build` on Apple silicon for Metal, or add `-DGGML_CUDA=ON` for NVIDIA GPUs.
 
 - With `-np 2` or more, the server decodes the state once and copies it for each question. With `-np 1` it decodes the state again for every question. The scores are the same.
 - `-c` is shared by the slots. With `-np 2`, the state plus one branch must fit in `-c / 2`.
