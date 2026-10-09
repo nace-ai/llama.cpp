@@ -32,7 +32,7 @@ The context length is 32,768 tokens. The recommended default is 16,384. `SYSTEMO
 git clone --branch drex-v1.5 https://github.com/nace-ai/llama.cpp.git
 ```
 
-Drex DLM: build `llama-server`, convert the model, and start it as described in [nace-ai/drex-dlm](https://github.com/nace-ai/drex-dlm).
+Drex DLM: build `llama-server`, convert the model, and start it as described in [models/drex-dlm](https://github.com/nace-ai/drex-decision-models/tree/main/models/drex-dlm).
 
 Drex v1.5: `convert_hf_to_gguf.py` writes `head.pt` into the GGUF as `pointer.*` tensors. Pass `--no-mtp`, because the checkpoint has no MTP block.
 
