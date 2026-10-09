@@ -2764,6 +2764,11 @@ private:
                         fail("loaded model cannot score System One", ERROR_TYPE_NOT_SUPPORTED);
                         break;
                     }
+                    if (!causal && std::max({systemone_limit("SYSTEMONE_MAX_STATE"), systemone_limit("SYSTEMONE_MAX_BRANCH"),
+                            systemone_limit("SYSTEMONE_MAX_PACKED")}) > SYSTEMONE_EDLM_CONTEXT_LENGTH) {
+                        fail("this model supports at most " + std::to_string(SYSTEMONE_EDLM_CONTEXT_LENGTH) + " tokens; lower SYSTEMONE_CONTEXT");
+                        break;
+                    }
                     if (n_all <= 0 || (int) task.systemone_segments.size() != n_all ||
                             (int) task.systemone_positions.size() != n_all || task.systemone_groups.empty() ||
                             task.systemone_n_state <= 0 || task.systemone_n_state > n_all) {

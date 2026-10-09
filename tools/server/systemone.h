@@ -4,14 +4,16 @@
 #include "server-common.h"
 
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <vector>
 
 // POST /v1/systemone. Protocol only. The loaded architecture scores the encoded record.
-// The position window is 32768. The recommended serving context is 16384.
+// The position window is 131072 (32768 for edlm). The recommended serving context is 16384.
 constexpr int SYSTEMONE_MAX_OPTIONS = 255;
-constexpr int SYSTEMONE_CONTEXT_LENGTH = 32768;
+constexpr int SYSTEMONE_CONTEXT_LENGTH = 131072;
+constexpr int SYSTEMONE_EDLM_CONTEXT_LENGTH = 32768;
 constexpr int SYSTEMONE_RECOMMENDED_CONTEXT = 16384;
 constexpr int SYSTEMONE_MAX_STATE = SYSTEMONE_RECOMMENDED_CONTEXT;
 constexpr int SYSTEMONE_MAX_BRANCH = SYSTEMONE_RECOMMENDED_CONTEXT;
@@ -27,6 +29,7 @@ inline int systemone_max(const char * name, int fallback) {
     char * end = nullptr;
     const long value = std::strtol(env, &end, 10);
     if (end == env || *end != '\0' || value < 1 || value > SYSTEMONE_POSITION_LIMIT) {
+        std::fprintf(stderr, "%s=%s is invalid or above %d, using %d\n", name, env, SYSTEMONE_POSITION_LIMIT, fallback);
         return fallback;
     }
     return (int) value;
