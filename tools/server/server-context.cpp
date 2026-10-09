@@ -15,6 +15,7 @@
 #include "log.h"
 #include "sampling.h"
 #include "speculative.h"
+#include "gguf.h"
 #include "mtmd.h"
 #include "mtmd-helper.h"
 
@@ -43,6 +44,21 @@
 
 constexpr int HTTP_POLLING_SECONDS = 1;
 
+// qwen35 models with a pointer head output one row per option of a System One question
+static bool server_has_pointer_head(const std::string & path) {
+    gguf_init_params gguf_params = { /* .no_alloc = */ true, /* .ctx = */ nullptr };
+    gguf_context * gguf_ctx = gguf_init_from_file(path.c_str(), gguf_params);
+    if (!gguf_ctx) {
+        return false;
+    }
+    const int64_t arch_id = gguf_find_key(gguf_ctx, "general.architecture");
+    const bool ok = arch_id >= 0 && gguf_get_kv_type(gguf_ctx, arch_id) == GGUF_TYPE_STRING &&
+            std::strcmp(gguf_get_val_str(gguf_ctx, arch_id), "qwen35") == 0 &&
+            gguf_find_tensor(gguf_ctx, "pointer.q.weight") >= 0;
+    gguf_free(gguf_ctx);
+    return ok;
+}
+
 static common_speculative_output_limits server_output_limits(const common_params & params) {
     if (params.embedding ||
             (params.pooling_type != LLAMA_POOLING_TYPE_UNSPECIFIED && params.pooling_type != LLAMA_POOLING_TYPE_NONE)) {
@@ -54,6 +70,11 @@ static common_speculative_output_limits server_output_limits(const common_params
 
     result.total   = std::max<int32_t>(1, result.total);
     result.per_seq = std::max<int32_t>(1, result.per_seq);
+    if (!params.model.path.empty() && server_has_pointer_head(params.model.path)) {
+        const int32_t n_system_one = std::min<int32_t>(params.n_batch, SYSTEMONE_MAX_OPTIONS + 1);
+        result.total   = std::max(result.total,   n_system_one);
+        result.per_seq = std::max(result.per_seq, n_system_one);
+    }
     return result;
 }
 
@@ -2723,7 +2744,7 @@ private:
                         return n > 0 && std::strcmp(buf, name) == 0;
                     };
                     auto fail = [&](const std::string & message, error_type type = ERROR_TYPE_INVALID_REQUEST) {
-                        if (ctx_tgt && arch_is("edlm")) {
+                        if (ctx_tgt && (arch_is("edlm") || arch_is("qwen35"))) {
                             llama_edlm_set_segments(ctx_tgt, nullptr, 0);
                         }
                         auto err = std::make_unique<server_task_result_error>();
@@ -2737,8 +2758,9 @@ private:
                         fail("model is not loaded");
                         break;
                     }
-                    // First backend. Another architecture that can score this record plugs in here.
-                    if (!arch_is("edlm")) {
+                    // Backends: edlm (diffusion encoder) and causal models with a pointer head (qwen35).
+                    const bool causal = arch_is("qwen35");
+                    if (!causal && !arch_is("edlm")) {
                         fail("loaded model cannot score System One", ERROR_TYPE_NOT_SUPPORTED);
                         break;
                     }
@@ -2757,6 +2779,156 @@ private:
                     }
                     if (busy) {
                         fail("systemone encode needs the context idle");
+                        break;
+                    }
+                    if (causal) {
+                        // One causal row per question: state, then that question's branch. The state is decoded once and copied per question.
+                        const int n_state = task.systemone_n_state;
+                        const uint32_t n_batch = llama_n_batch(ctx_tgt);
+                        llama_memory_t mem = llama_get_memory(ctx_tgt);
+                        const bool copy_state = llama_n_seq_max(ctx_tgt) >= 2;
+                        const llama_seq_id seq_row = copy_state ? 1 : 0;
+                        std::vector<std::vector<float>> scored;
+                        bool ok = mem != nullptr;
+                        if (!ok) {
+                            fail("loaded model has no memory for System One", ERROR_TYPE_NOT_SUPPORTED);
+                        }
+                        for (int i = 0; ok && i < n_state; ++i) {
+                            if (task.systemone_segments[i] != 0 || task.systemone_positions[i] != i) {
+                                fail("systemone row layout is malformed");
+                                ok = false;
+                            }
+                        }
+                        if (ok && n_state >= (int) llama_n_ctx_seq(ctx_tgt)) {
+                            fail("systemone state of " + std::to_string(n_state) + " tokens does not fit the slot context of " +
+                                 std::to_string(llama_n_ctx_seq(ctx_tgt)) + "; raise -c, it is shared by all slots");
+                            ok = false;
+                        }
+                        auto decode_span = [&](llama_seq_id seq, int begin, int end, int pos0, int32_t decide, const std::vector<int32_t> & options) -> bool {
+                            const int n = end - begin;
+                            if (n <= 0 || (uint32_t) n > n_batch) {
+                                fail("systemone batch of " + std::to_string(n) + " tokens does not fit n_batch=" + std::to_string(n_batch) + "; raise -b -ub");
+                                return false;
+                            }
+                            llama_batch batch = llama_batch_init(n, 0, 1);
+                            batch.n_tokens = n;
+                            for (int i = 0; i < n; ++i) {
+                                batch.token[i] = task.systemone_tokens[begin + i];
+                                batch.pos[i] = pos0 + i;
+                                batch.n_seq_id[i] = 1;
+                                batch.seq_id[i][0] = seq;
+                                batch.logits[i] = 0;
+                            }
+                            // only the readout tokens are output
+                            batch.logits[decide] = 1;
+                            for (int32_t opt : options) {
+                                batch.logits[opt] = 1;
+                            }
+                            llama_edlm_set_readout(ctx_tgt, decide, options.data(), (int32_t) options.size());
+                            const int rc = llama_decode(ctx_tgt, batch);
+                            llama_batch_free(batch);
+                            if (rc != 0) {
+                                fail("systemone decode failed");
+                                return false;
+                            }
+                            return true;
+                        };
+                        const auto t0 = std::chrono::steady_clock::now();
+                        if (ok) {
+                            for (auto & slot : slots) {
+                                slot.prompt_clear();
+                            }
+                            llama_memory_clear(mem, true);
+                        }
+                        // the state pass needs no readout, the last token is the output
+                        auto decode_state = [&](llama_seq_id seq) -> bool {
+                            for (int begin = 0; begin < n_state; begin += (int) n_batch) {
+                                const int end = std::min(n_state, begin + (int) n_batch);
+                                if (!decode_span(seq, begin, end, begin, end - begin - 1, {end - begin - 1})) {
+                                    return false;
+                                }
+                            }
+                            return true;
+                        };
+                        if (ok && copy_state) {
+                            ok = decode_state(0);
+                        }
+                        int cursor = n_state;
+                        for (const auto & group : task.systemone_groups) {
+                            if (!ok) {
+                                break;
+                            }
+                            if (group.decide < cursor || group.decide >= n_all) {
+                                fail("systemone row layout is malformed");
+                                ok = false;
+                                break;
+                            }
+                            const int end = group.decide + 1;
+                            if (n_state + (end - cursor) > (int) llama_n_ctx_seq(ctx_tgt)) {
+                                fail("systemone row of " + std::to_string(n_state + (end - cursor)) + " tokens does not fit the slot context of " +
+                                     std::to_string(llama_n_ctx_seq(ctx_tgt)) + "; raise -c, it is shared by all slots");
+                                ok = false;
+                                break;
+                            }
+                            for (int i = cursor; i < end; ++i) {
+                                if (task.systemone_segments[i] <= 0 || task.systemone_positions[i] != n_state + (i - cursor)) {
+                                    fail("systemone row layout is malformed");
+                                    ok = false;
+                                    break;
+                                }
+                            }
+                            std::vector<int32_t> options;
+                            for (int32_t opt : group.options) {
+                                if (opt < cursor || opt > group.decide) {
+                                    fail("systemone readout is outside the batch");
+                                    ok = false;
+                                    break;
+                                }
+                                options.push_back(opt - cursor);
+                            }
+                            if (!ok) {
+                                break;
+                            }
+                            if (copy_state) {
+                                llama_memory_seq_cp(mem, 0, seq_row, -1, -1);
+                            } else {
+                                llama_memory_seq_rm(mem, 0, -1, -1);
+                                ok = decode_state(0);
+                            }
+                            ok = ok && decode_span(seq_row, cursor, end, n_state, group.decide - cursor, options);
+                            if (ok) {
+                                llama_edlm_retarget_readout(ctx_tgt, group.decide - cursor, options.data(), (int32_t) options.size());
+                                float * logits = llama_edlm_get_pointer_logits(ctx_tgt);
+                                if (!logits) {
+                                    fail("model has no pointer head");
+                                    ok = false;
+                                } else {
+                                    scored.emplace_back(logits, logits + options.size());
+                                }
+                            }
+                            if (copy_state) {
+                                llama_memory_seq_rm(mem, seq_row, -1, -1);
+                            }
+                            cursor = end;
+                        }
+                        if (ok && cursor != n_all) {
+                            fail("systemone row layout is malformed");
+                            ok = false;
+                        }
+                        llama_edlm_set_segments(ctx_tgt, nullptr, 0);
+                        llama_set_embeddings(ctx_tgt, false);
+                        if (mem) {
+                            llama_memory_clear(mem, true);
+                        }
+                        if (!ok) {
+                            break;
+                        }
+                        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                        auto res = std::make_unique<server_task_result_systemone>();
+                        res->id = task.id;
+                        res->groups = std::move(scored);
+                        res->latency_ms = std::round(ms * 10.0) / 10.0;
+                        queue_results.send(std::move(res));
                         break;
                     }
                     auto encode_span = [&](const std::vector<llama_token> & tokens,

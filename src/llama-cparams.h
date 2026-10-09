@@ -19,6 +19,7 @@ struct llama_edlm_state {
     std::vector<float> temp;
     bool weights_ready = false;
     bool scored = false;
+    bool select_outputs = false; // decode path: output only the marked tokens, and no logits
 };
 
 #define LLAMA_MAX_SEQ 256

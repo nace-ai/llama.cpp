@@ -8,6 +8,7 @@ import numpy as np
 import torch
 
 if TYPE_CHECKING:
+    from pathlib import Path
     from torch import Tensor
 
 from .base import LazyTorchTensor, ModelBase, ModelType, TextModel, get_model_architecture, gguf, logger
@@ -255,18 +256,18 @@ class Qwen3Model(Qwen2Model):
         yield from super().modify_tensors(data_torch, name, bid)
 
 
-@ModelBase.register("EfficientDLM")
-@ModelBase.example("nace-ai/drex-dlm")
-class EfficientDLMModel(Qwen3Model):
-    model_arch = gguf.MODEL_ARCH.EDLM
+class _PointerHeadMixin:
+    """Bundles the pointer head of a Drex checkpoint (head.pt) into the GGUF."""
+
+    dir_model: Path
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None):
         if name.startswith("pointer."):
             return [(name, data_torch)]
-        return super().modify_tensors(data_torch, name, bid)
+        return super().modify_tensors(data_torch, name, bid)  # ty: ignore[unresolved-attribute]
 
     def generate_extra_tensors(self) -> Iterable[tuple[str, Tensor]]:
-        yield from super().generate_extra_tensors()
+        yield from super().generate_extra_tensors()  # ty: ignore[unresolved-attribute]
         head_path = self.dir_model / "head.pt"
         if not head_path.exists():
             return
@@ -283,6 +284,12 @@ class EfficientDLMModel(Qwen3Model):
                 yield dst, head[src].float()
         if isinstance(blob, dict) and "temperature" in blob:
             yield "pointer.temperature.weight", torch.tensor([float(blob["temperature"])], dtype=torch.float32)
+
+
+@ModelBase.register("EfficientDLM")
+@ModelBase.example("nace-ai/drex-dlm")
+class EfficientDLMModel(_PointerHeadMixin, Qwen3Model):
+    model_arch = gguf.MODEL_ARCH.EDLM
 
 
 @ModelBase.register("Qwen3MoeForCausalLM")
@@ -681,7 +688,7 @@ class _Qwen35MRopeMixin:
 
 @ModelBase.register("Qwen3_5ForConditionalGeneration", "Qwen3_5ForCausalLM")
 @ModelBase.example("Qwen/Qwen3.5-9B")
-class Qwen3_5TextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
+class Qwen3_5TextModel(_PointerHeadMixin, _Qwen35MRopeMixin, _LinearAttentionVReorderBase):
     model_arch = gguf.MODEL_ARCH.QWEN35
 
 

@@ -1737,7 +1737,7 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
     const int64_t n_vocab = vocab.n_tokens();
 
     // when computing embeddings, all tokens are output
-    const bool output_all   = cparams.embeddings;
+    const bool output_all   = cparams.embeddings && !edlm.select_outputs;
     const bool has_samplers = !sampling.samplers.empty();
 
     const uint32_t n_seq_max = cparams.kv_unified ? LLAMA_MAX_SEQ : cparams.n_seq_max;
@@ -2111,6 +2111,10 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
     // wait for the computation to finish (automatically done when obtaining the model output)
     //synchronize();
 
+    if (edlm.select_outputs) {
+        edlm.scored = cparams.embeddings && embd.data != nullptr;
+    }
+
     return 0;
 }
 
@@ -2129,7 +2133,7 @@ uint32_t llama_context::output_reserve(int32_t n_outputs) {
     const auto n_embd     = hparams.n_embd;
     const auto n_embd_out = hparams.n_embd_out();
 
-    bool has_logits     = true;
+    bool has_logits     = !edlm.select_outputs;
     bool has_embd       = cparams.embeddings;
     bool has_embd_nextn = cparams.embeddings_nextn;
 
@@ -3983,6 +3987,7 @@ void llama_set_embeddings(llama_context * ctx, bool embeddings) {
 
 void llama_context::edlm_set_segments(const int32_t * seg, int32_t n) {
     edlm.scored = false;
+    edlm.select_outputs = false;
     edlm.seg.clear();
     edlm.pos.clear();
     if (seg == nullptr || n <= 0) {
@@ -4003,6 +4008,8 @@ void llama_context::edlm_set_readout(int32_t decide_idx, const int32_t * opt_idx
     edlm.scored = false;
     edlm_retarget_readout(decide_idx, opt_idx, n_opt);
     if (decide_idx >= 0 && opt_idx != nullptr && n_opt > 0) {
+        // causal models with a memory go through llama_decode, and only the readout tokens are output
+        edlm.select_outputs = model.arch != LLM_ARCH_EDLM;
         set_embeddings(true);
     }
 }
@@ -4044,6 +4051,7 @@ static bool edlm_read_f32(const ggml_tensor * t, std::vector<float> & out) {
 
 float * llama_context::edlm_pointer_logits() {
     synchronize();
+    output_reorder();
     if (!edlm.scored || edlm.decide < 0 || edlm.opt.empty() || !model.edlm_q || !model.edlm_k || !embd.data) {
         return nullptr;
     }

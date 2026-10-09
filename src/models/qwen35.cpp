@@ -1,6 +1,8 @@
 #include "models.h"
 #include "llama-memory-recurrent.h"
 
+#include "gguf.h"
+
 void llama_model_qwen35::load_arch_hparams(llama_model_loader & ml) {
     ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS,       hparams.f_norm_rms_eps);
     ml.get_key_or_arr(LLM_KV_ROPE_DIMENSION_SECTIONS,    hparams.rope_sections, 4, true);
@@ -46,6 +48,17 @@ void llama_model_qwen35::load_arch_tensors(llama_model_loader & ml) {
     // if output is NULL, init from the input tok embed
     if (output == NULL) {
         output = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), { n_embd, n_vocab }, TENSOR_DUPLICATED);
+    }
+
+    // optional pointer head, used by Drex v1.5
+    const int64_t tid = gguf_find_tensor(ml.metadata, "pointer.q.weight");
+    if (tid >= 0) {
+        const int64_t * ne = gguf_get_tensor_ne(ml.metadata, tid);
+        edlm_q    = create_tensor(tn(LLM_TENSOR_EDLM_POINTER_Q, "weight"), {ne[0], ne[1]}, 0);
+        edlm_q_b  = create_tensor(tn(LLM_TENSOR_EDLM_POINTER_Q, "bias"),   {ne[1]}, TENSOR_NOT_REQUIRED);
+        edlm_k    = create_tensor(tn(LLM_TENSOR_EDLM_POINTER_K, "weight"), {ne[0], ne[1]}, 0);
+        edlm_k_b  = create_tensor(tn(LLM_TENSOR_EDLM_POINTER_K, "bias"),   {ne[1]}, TENSOR_NOT_REQUIRED);
+        edlm_temp = create_tensor(tn(LLM_TENSOR_EDLM_POINTER_TEMP, "weight"), {1}, TENSOR_NOT_REQUIRED);
     }
 
     auto load_block_trunk = [&](int il, int flags) {

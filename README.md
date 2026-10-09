@@ -17,15 +17,37 @@
 
 </div>
 
-## Drex DLM
+## Drex
 
-This branch serves [Drex DLM](https://huggingface.co/nace-ai/drex-dlm). The architecture is `edlm`. `llama-server` answers `POST /v1/systemone`. The context length is 32,768 tokens. The recommended default is 16,384. `SYSTEMONE_CONTEXT=32768` selects the full window; also pass `-c 32768 -b 32768 -ub 32768`.
+This branch serves two Drex models. `llama-server` answers `POST /v1/systemone` for both.
+
+| Model | Architecture | Scoring |
+| --- | --- | --- |
+| [Drex DLM](https://huggingface.co/nace-ai/drex-dlm) | `edlm` | One packed encode with a bidirectional state |
+| [Drex v1.5](https://huggingface.co/nace-ai/drex-v1.5) | `qwen35` with a pointer head | One causal row per question: the state, then that question's branch |
+
+The context length is 32,768 tokens. The recommended default is 16,384. `SYSTEMONE_CONTEXT=32768` selects the full window; also pass `-c 32768 -b 32768 -ub 32768`.
 
 ```bash
-git clone --branch edlm https://github.com/nace-ai/llama.cpp.git
+git clone --branch drex-v1.5 https://github.com/nace-ai/llama.cpp.git
 ```
 
-Build `llama-server`, convert the model, and start it as described in [nace-ai/drex-dlm](https://github.com/nace-ai/drex-dlm).
+Drex DLM: build `llama-server`, convert the model, and start it as described in [nace-ai/drex-dlm](https://github.com/nace-ai/drex-dlm).
+
+Drex v1.5: `convert_hf_to_gguf.py` writes `head.pt` into the GGUF as `pointer.*` tensors. Pass `--no-mtp`, because the checkpoint has no MTP block.
+
+```bash
+python convert_hf_to_gguf.py /path/to/drex-v1.5 --outfile drex-v1.5.gguf --outtype bf16 --no-mtp
+llama-server -m drex-v1.5.gguf --port 8097 -np 2 -c 32768 -b 16384 -ub 2048 --embedding --pooling none
+```
+
+- Checked on the real weights against the Python Kev scorer (CUDA, bf16): token counts match, probabilities differ by at most 0.008 and no choice differs. Q8_0 differs by at most 0.034.
+- Metal was checked only on a small random model, with and without `GGML_METAL_TENSOR_DISABLE=1`. Both passed. If Metal output looks wrong on the real model, try that variable.
+
+- With `-np 2` or more, the server decodes the state once and copies it for each question. With `-np 1` it decodes the state again for every question. The scores are the same.
+- `-c` is shared by the slots. With `-np 2`, the state plus one branch must fit in `-c / 2`.
+- A question branch must fit in `-b`. The state can be longer, and the server decodes it in `-b` pieces.
+- Pointer weights stay in F32. `llama-quantize` skips `pointer.*` tensors.
 
 ## Quick start
 
