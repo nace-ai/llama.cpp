@@ -266,6 +266,12 @@ class _PointerHeadMixin:
             return [(name, data_torch)]
         return super().modify_tensors(data_torch, name, bid)  # ty: ignore[unresolved-attribute]
 
+    def tensor_force_quant(self, name, new_name, bid, n_dims):
+        # The runtime reads the pointer head as F32, F16 or BF16, so it is never quantized.
+        if new_name.startswith("pointer."):
+            return gguf.GGMLQuantizationType.F32
+        return super().tensor_force_quant(name, new_name, bid, n_dims)  # ty: ignore[unresolved-attribute]
+
     def generate_extra_tensors(self) -> Iterable[tuple[str, Tensor]]:
         yield from super().generate_extra_tensors()  # ty: ignore[unresolved-attribute]
         head_path = self.dir_model / "head.pt"
@@ -694,7 +700,7 @@ class Qwen3_5TextModel(_PointerHeadMixin, _Qwen35MRopeMixin, _LinearAttentionVRe
 
 @ModelBase.register("Qwen3_5MoeForConditionalGeneration", "Qwen3_5MoeForCausalLM")
 @ModelBase.example("Qwen/Qwen3.5-35B-A3B")
-class Qwen3_5MoeTextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
+class Qwen3_5MoeTextModel(_PointerHeadMixin, _Qwen35MRopeMixin, _LinearAttentionVReorderBase):
     model_arch = gguf.MODEL_ARCH.QWEN35MOE
 
 

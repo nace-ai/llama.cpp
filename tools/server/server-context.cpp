@@ -44,7 +44,7 @@
 
 constexpr int HTTP_POLLING_SECONDS = 1;
 
-// qwen35 models with a pointer head output one row per option of a System One question
+// qwen35 and qwen35moe models with a pointer head output one row per option of a System One question
 static bool server_has_pointer_head(const std::string & path) {
     gguf_init_params gguf_params = { /* .no_alloc = */ true, /* .ctx = */ nullptr };
     gguf_context * gguf_ctx = gguf_init_from_file(path.c_str(), gguf_params);
@@ -53,7 +53,8 @@ static bool server_has_pointer_head(const std::string & path) {
     }
     const int64_t arch_id = gguf_find_key(gguf_ctx, "general.architecture");
     const bool ok = arch_id >= 0 && gguf_get_kv_type(gguf_ctx, arch_id) == GGUF_TYPE_STRING &&
-            std::strcmp(gguf_get_val_str(gguf_ctx, arch_id), "qwen35") == 0 &&
+            (std::strcmp(gguf_get_val_str(gguf_ctx, arch_id), "qwen35") == 0 ||
+             std::strcmp(gguf_get_val_str(gguf_ctx, arch_id), "qwen35moe") == 0) &&
             gguf_find_tensor(gguf_ctx, "pointer.q.weight") >= 0;
     gguf_free(gguf_ctx);
     return ok;
@@ -2744,7 +2745,7 @@ private:
                         return n > 0 && std::strcmp(buf, name) == 0;
                     };
                     auto fail = [&](const std::string & message, error_type type = ERROR_TYPE_INVALID_REQUEST) {
-                        if (ctx_tgt && (arch_is("edlm") || arch_is("qwen35"))) {
+                        if (ctx_tgt && (arch_is("edlm") || arch_is("qwen35") || arch_is("qwen35moe"))) {
                             llama_edlm_set_segments(ctx_tgt, nullptr, 0);
                         }
                         auto err = std::make_unique<server_task_result_error>();
@@ -2758,8 +2759,8 @@ private:
                         fail("model is not loaded");
                         break;
                     }
-                    // Backends: edlm (diffusion encoder) and causal models with a pointer head (qwen35).
-                    const bool causal = arch_is("qwen35");
+                    // Backends: edlm (diffusion encoder) and causal models with a pointer head (qwen35, qwen35moe).
+                    const bool causal = arch_is("qwen35") || arch_is("qwen35moe");
                     if (!causal && !arch_is("edlm")) {
                         fail("loaded model cannot score System One", ERROR_TYPE_NOT_SUPPORTED);
                         break;

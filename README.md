@@ -19,30 +19,35 @@
 
 ## Drex
 
-This branch serves two Drex models. `llama-server` answers `POST /v1/systemone` for both.
+This branch serves three Drex models. `llama-server` answers `POST /v1/systemone` for all of them.
 
 | Model | Architecture | Scoring |
 | --- | --- | --- |
 | [Drex DLM](https://huggingface.co/nace-ai/drex-dlm) | `edlm` | One packed encode with a bidirectional state |
 | [Drex v1.5](https://huggingface.co/nace-ai/drex-v1.5) | `qwen35` with a pointer head | One causal row per question: the state, then that question's branch |
+| [Drex v2.0](https://huggingface.co/nace-ai/drex-v2.0) | `qwen35moe` with a pointer head | The same causal rows as Drex v1.5 |
 
 The context length is 32,768 tokens. The recommended default is 16,384. `SYSTEMONE_CONTEXT=32768` selects the full window; also pass `-c 32768 -b 32768 -ub 32768`.
 
 ```bash
-git clone --branch drex-v1.5 https://github.com/nace-ai/llama.cpp.git
+git clone --branch drex-v2.0 https://github.com/nace-ai/llama.cpp.git
 ```
 
 Drex DLM: build `llama-server`, convert the model, and start it as described in [models/drex-dlm](https://github.com/nace-ai/drex-decision-models/tree/main/models/drex-dlm).
 
-Drex v1.5: `convert_hf_to_gguf.py` writes `head.pt` into the GGUF as `pointer.*` tensors. Pass `--no-mtp`, because the checkpoint has no MTP block.
+Drex v1.5 and Drex v2.0: `convert_hf_to_gguf.py` writes `head.pt` into the GGUF as `pointer.*` tensors. Pass `--no-mtp`, because the checkpoint has no MTP block.
 
 ```bash
 python convert_hf_to_gguf.py /path/to/drex-v1.5 --outfile drex-v1.5.gguf --outtype bf16 --no-mtp
 llama-server -m drex-v1.5.gguf --port 8097 -np 2 -c 32768 -b 16384 -ub 2048 --embedding --pooling none
 ```
 
+Drex v2.0 uses the same commands with its own weights. Its Q8_0 GGUF is 36.9 GB, so on a 48 GB Mac add `-ngl 28` to offload 28 layers to Metal; `-ngl 0` runs on the CPU.
+
 - Tested on an AWS g5.2xlarge (NVIDIA A10G 24 GB, 8 vCPU AMD EPYC 7R32, 32 GiB RAM, Ubuntu 24.04, CUDA 13.2), against the Python Kev scorer on two requests (87 and 5,104 tokens, six questions): token counts match, probabilities differ by at most 0.0075 in bf16 and 0.034 in Q8_0, and every answer is the same.
 - On an Apple M5 Pro (18-core CPU, 20-core GPU, 48 GB unified memory, macOS 26.5.2) the Q8_0 model gives the same answers on Metal (probabilities within 0.019 of the Python scorer, 0.57 s for the 87-token request) and on the CPU (within 0.035). Build with `cmake -B build` on Apple silicon for Metal, or add `-DGGML_CUDA=ON` for NVIDIA GPUs.
+
+- Drex v2.0 was tested on the same Apple M5 Pro: the Q8_0 model gives the same answers on Metal with `-ngl 28` and on the CPU.
 
 - With `-np 2` or more, the server decodes the state once and copies it for each question. With `-np 1` it decodes the state again for every question. The scores are the same.
 - `-c` is shared by the slots. With `-np 2`, the state plus one branch must fit in `-c / 2`.
