@@ -17,6 +17,7 @@ struct llama_edlm_state {
     std::vector<float> bq;
     std::vector<float> bk;
     std::vector<float> temp;
+    std::vector<float> wr; // linear readout of Drex Max, [n_opt_max x n_embd]
     bool weights_ready = false;
     bool scored = false;
     bool select_outputs = false; // decode path: output only the marked tokens, and no logits

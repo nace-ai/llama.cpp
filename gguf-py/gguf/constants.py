@@ -1257,6 +1257,7 @@ class MODEL_TENSOR(IntEnum):
     EDLM_POINTER_Q         = auto()
     EDLM_POINTER_K         = auto()
     EDLM_POINTER_TEMP      = auto()
+    EDLM_READOUT           = auto()
 
 
 MODEL_ARCH_NAMES: dict[MODEL_ARCH, str] = {
@@ -2015,6 +2016,7 @@ TENSOR_NAMES: dict[MODEL_TENSOR, str] = {
     MODEL_TENSOR.EDLM_POINTER_Q:            "pointer.q",
     MODEL_TENSOR.EDLM_POINTER_K:            "pointer.k",
     MODEL_TENSOR.EDLM_POINTER_TEMP:         "pointer.temperature",
+    MODEL_TENSOR.EDLM_READOUT:              "pointer.readout",
 }
 
 MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
@@ -2934,6 +2936,7 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
         MODEL_TENSOR.EDLM_POINTER_Q,
         MODEL_TENSOR.EDLM_POINTER_K,
         MODEL_TENSOR.EDLM_POINTER_TEMP,
+        MODEL_TENSOR.EDLM_READOUT,
     ],
     MODEL_ARCH.QWEN35MOE: [
         MODEL_TENSOR.TOKEN_EMBD,

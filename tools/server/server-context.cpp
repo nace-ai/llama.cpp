@@ -842,6 +842,7 @@ struct server_context_impl {
     friend struct server_context;
 
 public:
+    llama_context * get_ctx_tgt() const { return ctx_tgt; }
     // only use these pointers outside of this class:
     //  - when not in sleeping state
     //  - and, with thread-safe APIs (e.g., tokenizer calls)
@@ -2772,7 +2773,7 @@ private:
                     }
                     if (n_all <= 0 || (int) task.systemone_segments.size() != n_all ||
                             (int) task.systemone_positions.size() != n_all || task.systemone_groups.empty() ||
-                            task.systemone_n_state <= 0 || task.systemone_n_state > n_all) {
+                            (!task.systemone_max && (task.systemone_n_state <= 0 || task.systemone_n_state > n_all))) {
                         fail("systemone request is empty");
                         break;
                     }
@@ -2785,6 +2786,90 @@ private:
                     }
                     if (busy) {
                         fail("systemone encode needs the context idle");
+                        break;
+                    }
+                    if (task.systemone_max) {
+                        // Drex Max: every question is its own non-causal row, read out at its last token through a linear head.
+                        if (!causal || llama_get_causal_attn(ctx_tgt)) {
+                            fail("loaded model is not a Drex Max model", ERROR_TYPE_NOT_SUPPORTED);
+                            break;
+                        }
+                        llama_memory_t mem = llama_get_memory(ctx_tgt);
+                        if (!mem) {
+                            fail("loaded model has no memory for System One", ERROR_TYPE_NOT_SUPPORTED);
+                            break;
+                        }
+                        const int row_cap = (int) std::min<uint32_t>(llama_n_ubatch(ctx_tgt), llama_n_ctx_seq(ctx_tgt));
+                        std::vector<std::vector<float>> scored;
+                        bool ok = true;
+                        for (auto & slot : slots) {
+                            slot.prompt_clear();
+                        }
+                        const auto t0 = std::chrono::steady_clock::now();
+                        int cursor = 0;
+                        for (const auto & group : task.systemone_groups) {
+                            const int end = group.decide + 1;
+                            const int n = end - cursor;
+                            if (group.decide < cursor || end > n_all || n <= 0) {
+                                fail("systemone row layout is malformed");
+                                ok = false;
+                                break;
+                            }
+                            if (n > row_cap) {
+                                fail("systemone row of " + std::to_string(n) + " tokens does not fit n_ubatch/slot context of " +
+                                     std::to_string(row_cap) + "; raise -b -ub and -c");
+                                ok = false;
+                                break;
+                            }
+                            llama_memory_clear(mem, true);
+                            llama_batch batch = llama_batch_init(n, 0, 1);
+                            batch.n_tokens = n;
+                            for (int i = 0; i < n; ++i) {
+                                batch.token[i] = task.systemone_tokens[cursor + i];
+                                batch.pos[i] = i;
+                                batch.n_seq_id[i] = 1;
+                                batch.seq_id[i][0] = 0;
+                                batch.logits[i] = 0;
+                            }
+                            batch.logits[n - 1] = 1;
+                            // the option indices only carry the option count
+                            std::vector<int32_t> options(group.options.size());
+                            for (size_t i = 0; i < options.size(); ++i) {
+                                options[i] = (int32_t) i;
+                            }
+                            llama_edlm_set_readout(ctx_tgt, n - 1, options.data(), (int32_t) options.size());
+                            const int rc = llama_decode(ctx_tgt, batch);
+                            llama_batch_free(batch);
+                            if (rc != 0) {
+                                fail("systemone decode failed");
+                                ok = false;
+                                break;
+                            }
+                            float * logits = llama_edlm_get_pointer_logits(ctx_tgt);
+                            if (!logits) {
+                                fail("model has no readout head");
+                                ok = false;
+                                break;
+                            }
+                            scored.emplace_back(logits, logits + options.size());
+                            cursor = end;
+                        }
+                        llama_memory_clear(mem, true);
+                        llama_edlm_set_segments(ctx_tgt, nullptr, 0);
+                        llama_set_embeddings(ctx_tgt, false);
+                        if (ok && cursor != n_all) {
+                            fail("systemone row layout is malformed");
+                            ok = false;
+                        }
+                        if (!ok) {
+                            break;
+                        }
+                        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                        auto res = std::make_unique<server_task_result_systemone>();
+                        res->id = task.id;
+                        res->groups = std::move(scored);
+                        res->latency_ms = std::round(ms * 10.0) / 10.0;
+                        queue_results.send(std::move(res));
                         break;
                     }
                     if (causal) {
@@ -5492,6 +5577,7 @@ void server_routes::init_routes() {
         systemone_encoded encoded;
         std::string model_name = meta && !meta->model_name.empty() ? meta->model_name : std::string();
         int n_input = 0;
+        bool max_mode = false;
         try {
             const json body = json::parse(req.body);
             if (body.contains("model") && body.at("model").is_string()) {
@@ -5500,7 +5586,13 @@ void server_routes::init_routes() {
                     model_name = requested;
                 }
             }
-            encoded = systemone_encode(ctx_server.vocab, body);
+            llama_context * lctx = ctx_server.get_ctx_tgt();
+            if (lctx != nullptr && !llama_get_causal_attn(lctx)) {
+                char arch[64] = {0};
+                llama_model_meta_val_str(llama_get_model(lctx), "general.architecture", arch, sizeof(arch));
+                max_mode = std::strcmp(arch, "qwen35") == 0;
+            }
+            encoded = max_mode ? systemone_encode_max(ctx_server.vocab, body) : systemone_encode(ctx_server.vocab, body);
             n_input = (int) encoded.tokens.size();
         } catch (const std::exception & e) {
             res->error(format_error_response(e.what(), ERROR_TYPE_INVALID_REQUEST));
@@ -5513,6 +5605,7 @@ void server_routes::init_routes() {
             task.id = rd.get_new_id();
             task.systemone_rows = n_input > systemone_limit("SYSTEMONE_MAX_PACKED");
             task.systemone_n_state = encoded.n_state;
+            task.systemone_max = max_mode;
             task.systemone_tokens = std::move(encoded.tokens);
             task.systemone_segments = std::move(encoded.segments);
             task.systemone_positions = std::move(encoded.positions);

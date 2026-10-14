@@ -4052,6 +4052,37 @@ static bool edlm_read_f32(const ggml_tensor * t, std::vector<float> & out) {
 float * llama_context::edlm_pointer_logits() {
     synchronize();
     output_reorder();
+    if (edlm.scored && edlm.decide >= 0 && !edlm.opt.empty() && model.edlm_readout && embd.data) {
+        // Linear readout head: one logit per option code from the decide row. Only the option count is used.
+        if (!edlm.weights_ready) {
+            if (!edlm_read_f32(model.edlm_readout, edlm.wr)) {
+                LLAMA_LOG_ERROR("%s: readout weights must be F32, F16, or BF16\n", __func__);
+                return nullptr;
+            }
+            if (model.edlm_temp) {
+                edlm_read_f32(model.edlm_temp, edlm.temp);
+            }
+            edlm.weights_ready = true;
+        }
+        const int64_t n_in   = model.edlm_readout->ne[0];
+        const int64_t n_rows = model.edlm_readout->ne[1];
+        const uint32_t n_embd_out = model.hparams.n_embd_out();
+        if (n_in != (int64_t) n_embd_out || (int64_t) edlm.opt.size() > n_rows) {
+            return nullptr;
+        }
+        const float temperature = edlm.temp.empty() || edlm.temp[0] == 0.0f ? 1.0f : edlm.temp[0];
+        const float * h = embd.data + output_resolve_row(edlm.decide) * n_embd_out;
+        edlm.pointer_logits.resize(edlm.opt.size());
+        for (size_t i = 0; i < edlm.opt.size(); ++i) {
+            const float * row = edlm.wr.data() + (int64_t) i * n_in;
+            float acc = 0.0f;
+            for (int64_t e = 0; e < n_in; ++e) {
+                acc += row[e] * h[e];
+            }
+            edlm.pointer_logits[i] = acc / temperature;
+        }
+        return edlm.pointer_logits.data();
+    }
     if (!edlm.scored || edlm.decide < 0 || edlm.opt.empty() || !model.edlm_q || !model.edlm_k || !embd.data) {
         return nullptr;
     }

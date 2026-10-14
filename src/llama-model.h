@@ -686,6 +686,7 @@ struct llama_model {
     struct ggml_tensor * edlm_k    = nullptr;
     struct ggml_tensor * edlm_k_b  = nullptr;
     struct ggml_tensor * edlm_temp = nullptr;
+    struct ggml_tensor * edlm_readout = nullptr; // linear readout head of Drex Max, one row per option code
 
     struct ggml_tensor * conv1d   = nullptr;
     struct ggml_tensor * conv1d_b = nullptr;

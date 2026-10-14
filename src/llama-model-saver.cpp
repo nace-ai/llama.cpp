@@ -492,6 +492,7 @@ void llama_model_saver::add_tensors_from_model() {
     add_tensor(model->edlm_k);
     add_tensor(model->edlm_k_b);
     add_tensor(model->edlm_temp);
+    add_tensor(model->edlm_readout);
     add_tensor(model->hrm_z_l_init);
     add_tensor(model->hc_head_fn);
     add_tensor(model->hc_head_base);

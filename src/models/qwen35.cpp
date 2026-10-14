@@ -61,6 +61,14 @@ void llama_model_qwen35::load_arch_tensors(llama_model_loader & ml) {
         edlm_temp = create_tensor(tn(LLM_TENSOR_EDLM_POINTER_TEMP, "weight"), {1}, TENSOR_NOT_REQUIRED);
     }
 
+    // optional linear readout head, used by Drex Max: one row per option code
+    const int64_t rid = gguf_find_tensor(ml.metadata, "pointer.readout.weight");
+    if (rid >= 0) {
+        const int64_t * ne = gguf_get_tensor_ne(ml.metadata, rid);
+        edlm_readout = create_tensor(tn(LLM_TENSOR_EDLM_READOUT, "weight"), {ne[0], ne[1]}, 0);
+        edlm_temp    = create_tensor(tn(LLM_TENSOR_EDLM_POINTER_TEMP, "weight"), {1}, TENSOR_NOT_REQUIRED);
+    }
+
     auto load_block_trunk = [&](int il, int flags) {
         auto & layer = layers[il];
 

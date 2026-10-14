@@ -187,6 +187,7 @@ struct server_task {
     std::vector<systemone_group> systemone_groups;
     int32_t systemone_n_state = 0;
     bool systemone_rows = false;
+    bool systemone_max = false; // one independent non-causal row per question, no shared state
 
     server_task() = default;
 

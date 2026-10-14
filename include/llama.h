@@ -1123,6 +1123,9 @@ extern "C" {
     // Enables embedding extraction. Call again before the batch, then llama_decode / llama_encode.
     LLAMA_API void llama_edlm_set_readout(struct llama_context * ctx, int32_t decide_idx, const int32_t * opt_idx, int32_t n_opt);
 
+    // Models with a linear readout head (Drex Max) read only the decide row. Then opt_idx[] just sets the number of
+    // option logits and its values are ignored.
+
     // Pointer logits from the last edlm readout. NULL if the head or the batch was not run. Length is n_opt.
     LLAMA_API float * llama_edlm_get_pointer_logits(struct llama_context * ctx);
 

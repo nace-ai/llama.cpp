@@ -68,6 +68,11 @@ struct systemone_encoded {
 // Throws std::runtime_error when the request is invalid or does not fit.
 systemone_encoded systemone_encode(const llama_vocab * vocab, const json & body);
 
+// Drex Max: one chat-template prompt per question, no shared state. Each question is its own row (segment id =
+// question number, positions restart at 0). The options of a group are placeholders, one index per option code.
+// Throws std::runtime_error when the request is invalid, has images, or does not fit.
+systemone_encoded systemone_encode_max(const llama_vocab * vocab, const json & body);
+
 json systemone_format_answers(const std::vector<std::vector<float>> & logits, const std::vector<systemone_question> & meta);
 
 // Tokens of a Python json.dumps of the answers. Not generated tokens.

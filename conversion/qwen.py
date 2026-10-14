@@ -698,6 +698,39 @@ class Qwen3_5TextModel(_PointerHeadMixin, _Qwen35MRopeMixin, _LinearAttentionVRe
     model_arch = gguf.MODEL_ARCH.QWEN35
 
 
+@ModelBase.register("Qwen3_5Model")
+@ModelBase.example("nace-ai/drex-max-v1")
+class DrexMaxModel(Qwen3_5TextModel):
+    """Drex Max: Qwen3.5 text backbone, bidirectional full attention, and a linear readout head.
+
+    The checkpoint stores the text tower as `language_model.*` (no `model.` prefix) next to `visual.*`, the readout
+    in readout.safetensors, and the softmax temperature in decision_config.json. The vision tower is not converted.
+    """
+
+    model_arch = gguf.MODEL_ARCH.QWEN35
+
+    @classmethod
+    def filter_tensors(cls, item):
+        name, gen = item
+        if name.startswith("language_model."):
+            item = ("model." + name, gen)
+        return super().filter_tensors(item)
+
+    def set_gguf_parameters(self):
+        super().set_gguf_parameters()
+        # Only the full-attention layers see the whole sequence. The linear-attention layers stay sequential.
+        self.gguf_writer.add_causal_attention(False)
+
+    def generate_extra_tensors(self) -> Iterable[tuple[str, Tensor]]:
+        yield from super().generate_extra_tensors()
+        from safetensors import safe_open
+
+        with safe_open(self.dir_model / "readout.safetensors", framework="pt", device="cpu") as f:
+            yield "pointer.readout.weight", f.get_tensor("weight").float()
+        cfg = json.loads((self.dir_model / "decision_config.json").read_text(encoding="utf-8"))
+        yield "pointer.temperature.weight", torch.tensor([float(cfg.get("temperature") or 1.0)], dtype=torch.float32)
+
+
 @ModelBase.register("Qwen3_5MoeForConditionalGeneration", "Qwen3_5MoeForCausalLM")
 @ModelBase.example("Qwen/Qwen3.5-35B-A3B")
 class Qwen3_5MoeTextModel(_PointerHeadMixin, _Qwen35MRopeMixin, _LinearAttentionVReorderBase):
