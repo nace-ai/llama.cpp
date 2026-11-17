@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from torch import Tensor
 
 from .base import LazyTorchTensor, ModelBase, gguf, jinja_str_or_json, logger
-from .qwen import Qwen3_5TextModel
+from .qwen import Qwen3_5MoeTextModel, Qwen3_5TextModel
 
 
 def _decision_lora_base(dir_model: Path) -> tuple[str, str | None]:
@@ -162,22 +162,37 @@ def _load_kev_hparams(dir_model: Path) -> dict[str, Any]:
     return _load_decision_lora_hparams(dir_model, "KevModel")
 
 
-@ModelBase.register("KevModel")
-@ModelBase.example("jaredpalmer/kev-4b")
-class KevModel(_DecisionLoraMixin, Qwen3_5TextModel):
-    model_arch = gguf.MODEL_ARCH.QWEN35
+def _is_kev_merged_checkpoint(dir_model: Path) -> bool:
+    # a Qwen3.5 model with the LoRA already merged, the pointer head is next to the weights
+    if not all((dir_model / name).is_file() for name in ("config.json", "head.pt")) or (dir_model / "adapter_config.json").is_file():
+        return False
+    with open(dir_model / "config.json", encoding="utf-8") as f:
+        return json.load(f).get("model_type") in ("qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text")
 
+
+@ModelBase.register_hparams_loader(_is_kev_merged_checkpoint)
+def _load_kev_merged_hparams(dir_model: Path) -> dict[str, Any]:
+    logger.info("gguf: detected merged Kev checkpoint")
+    hparams = ModelBase.load_hparams(dir_model, False, guess=False)
+    hparams["architectures"] = ["KevMoeModel" if hparams["model_type"].startswith("qwen3_5_moe") else "KevMergedModel"]
+    return hparams
+
+
+class _KevMixin:
     # TODO: the server needs a question and its options in one batch, the state can be in previous batches
     # note: no plan to support date_facts (kev/api.py), its regex matching is fragile, a more generic impl is needed
+    no_mtp = True
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.head = torch.load(self.dir_adapter / "head.pt", map_location="cpu", weights_only=True)
+    gguf_writer: gguf.GGUFWriter
+
+    def __init__(self, dir_model: Path, *args, **kwargs):
+        super().__init__(dir_model, *args, **kwargs)  # ty: ignore[too-many-positional-arguments]
+        self.head = torch.load(dir_model / "head.pt", map_location="cpu", weights_only=True)
         assert set(self.head["head"]) == {"q.weight", "q.bias", "k.weight", "k.bias"}
         assert self.head["head"]["q.weight"].shape[0] == self.head["head_dim"]
 
     def set_vocab(self):
-        super().set_vocab()
+        super().set_vocab()  # ty: ignore[missing-attribute]
         self.gguf_writer.add_chat_template([{"name": "systemone", "template": self._systemone_template()}])
 
     def _systemone_template(self) -> str:
@@ -194,18 +209,36 @@ class KevModel(_DecisionLoraMixin, Qwen3_5TextModel):
         )
 
     def set_gguf_parameters(self):
-        super().set_gguf_parameters()
+        super().set_gguf_parameters()  # ty: ignore[missing-attribute]
         self.gguf_writer.add_decision_type(gguf.DecisionType.KEV)
         self.gguf_writer.add_embedding_length_out(2 * self.head["head_dim"])
         for name in ("choice", "score", "noul"):
             self.gguf_writer.add_decision_temperature(name, self.head["temperature"])
 
     def generate_extra_tensors(self) -> Iterable[tuple[str, Tensor]]:
-        yield from super().generate_extra_tensors()
+        yield from super().generate_extra_tensors()  # ty: ignore[missing-attribute]
         # pointer head: the output of a token is [q | k]
         head = self.head["head"]
         yield "classifier.out_proj.weight", torch.cat([head["q.weight"], head["k.weight"]], dim=0)
         yield "classifier.out_proj.bias",   torch.cat([head["q.bias"],   head["k.bias"]],   dim=0)
+
+
+@ModelBase.register("KevModel")
+@ModelBase.example("jaredpalmer/kev-4b")
+class KevModel(_KevMixin, _DecisionLoraMixin, Qwen3_5TextModel):
+    model_arch = gguf.MODEL_ARCH.QWEN35
+
+
+@ModelBase.register("KevMergedModel")
+@ModelBase.example("nace-ai/drex-v1.5")
+class KevMergedModel(_KevMixin, Qwen3_5TextModel):
+    model_arch = gguf.MODEL_ARCH.QWEN35
+
+
+@ModelBase.register("KevMoeModel")
+@ModelBase.example("nace-ai/drex-v2.0")
+class KevMoeModel(_KevMixin, Qwen3_5MoeTextModel):
+    model_arch = gguf.MODEL_ARCH.QWEN35MOE
 
 
 def _is_nimble_checkpoint(dir_model: Path) -> bool:
