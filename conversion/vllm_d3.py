@@ -48,11 +48,6 @@ class VllmD3Model(PplxDeciderModel):
         if decision.get("prompt") != "d3" or decision.get("attention_mode") != "noncausal_full_attention" or decision.get("pooling") != "last":
             raise ValueError("unsupported Decision 3.0 configuration")
 
-    def set_gguf_parameters(self):
-        super().set_gguf_parameters()
-        # the full attention layers see the whole prompt
-        self.gguf_writer.add_causal_attention(False)
-
 
 @ModelBase.register("VllmD3Model")
 class VllmD3VisionModel(PplxDeciderVisionModel):

@@ -80,6 +80,9 @@ class PplxDeciderModel(Qwen3_5TextModel):
         self.gguf_writer.add_decision_type(self._DECISION_TYPE)
         for name in ("choice", "score", "noul"):
             self.gguf_writer.add_decision_temperature(name, self.hparams["decision"]["temperature"])
+        # the full attention layers see the whole prompt, the linear attention layers stay causal
+        if self.hparams["decision"].get("attention_mode") == "noncausal_full_attention":
+            self.gguf_writer.add_causal_attention(False)
 
     def generate_extra_tensors(self) -> Iterable[tuple[str, Tensor]]:
         yield from super().generate_extra_tensors()
